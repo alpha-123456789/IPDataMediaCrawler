@@ -47,7 +47,5 @@ async def init_db(db_type: str = None):
     await init_table_schema(db_type)
 
 async def close():
-    """
-    Placeholder for closing database connections if needed in the future.
-    """
-    pass
+    from database.db_session import close_all_engines
+    await close_all_engines()

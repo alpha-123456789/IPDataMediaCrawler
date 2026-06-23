@@ -61,7 +61,8 @@ class XiaoHongShuCrawler(AbstractCrawler):
         self.user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
         self.cdp_manager = None
         self.ip_proxy_pool = None  # Proxy IP pool for automatic proxy refresh
-
+        self.success = 0
+        self.mismatch = 0
     async def start(self) -> None:
         playwright_proxy_format, httpx_proxy_format = None, None
         if config.ENABLE_IP_PROXY:
@@ -124,7 +125,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
             else:
                 pass
 
-            utils.logger.info("[XiaoHongShuCrawler.start] Xhs Crawler finished ...")
+            utils.logger.info(f"[XiaoHongShuCrawler.start] Xhs Crawler finished ... all count:{config.CRAWLER_MAX_NOTES_COUNT},success:{self.success},mismatch:{self.mismatch}")
 
     async def search(self) -> None:
         """Search for notes and retrieve their comment information."""
@@ -169,13 +170,17 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     ]
                     note_details = await asyncio.gather(*task_list)
                     for note_detail in note_details:
-                        if note_detail:
+                        if note_detail and (keyword in note_detail.get("title","") or keyword in note_detail.get("desc","")):
+                            self.success += 1
                             await xhs_store.update_xhs_note(note_detail)
                             await self.get_notice_media(note_detail)
                             note_ids.append(note_detail.get("note_id"))
                             xsec_tokens.append(note_detail.get("xsec_token"))
+                        else:
+                            self.mismatch += 1
+                            utils.logger.info(f"[XiaoHongShuCrawler.search] Success Count:{self.success}, Mismatch Count:{self.mismatch} Title And Content No Keyword! https://www.xiaohongshu.com/explore/{note_detail.get('note_id')}?xsec_token={note_detail.get('xsec_token')}&xsec_source=pc_search")
                     page += 1
-                    utils.logger.info(f"[XiaoHongShuCrawler.search] Note details: {note_details}")
+                    utils.logger.info(f"[XiaoHongShuCrawler.search] Note details count: {len(note_details)}")
                     await self.batch_get_note_comments(note_ids, xsec_tokens)
 
                     # Sleep after each page navigation
@@ -207,23 +212,25 @@ class XiaoHongShuCrawler(AbstractCrawler):
                 utils.logger.error(f"[XiaoHongShuCrawler.get_creators_and_notes] Failed to parse creator URL: {e}")
                 continue
 
-            # Use fixed crawling interval
-            crawl_interval = config.CRAWLER_MAX_SLEEP_SEC
-            # Get all note information of the creator
-            all_notes_list = await self.xhs_client.get_all_notes_by_creator(
-                user_id=user_id,
-                crawl_interval=crawl_interval,
-                callback=self.fetch_creator_notes_detail,
-                xsec_token=creator_info.xsec_token,
-                xsec_source=creator_info.xsec_source,
-            )
-
-            note_ids = []
-            xsec_tokens = []
-            for note_item in all_notes_list:
-                note_ids.append(note_item.get("note_id"))
-                xsec_tokens.append(note_item.get("xsec_token"))
-            await self.batch_get_note_comments(note_ids, xsec_tokens)
+            # region 这里是抓取创作者的笔记，目前不需要，先隐藏
+            # # Use fixed crawling interval
+            # crawl_interval = config.CRAWLER_MAX_SLEEP_SEC
+            # # Get all note information of the creator
+            # all_notes_list = await self.xhs_client.get_all_notes_by_creator(
+            #     user_id=user_id,
+            #     crawl_interval=crawl_interval,
+            #     callback=self.fetch_creator_notes_detail,
+            #     xsec_token=creator_info.xsec_token,
+            #     xsec_source=creator_info.xsec_source,
+            # )
+            #
+            # note_ids = []
+            # xsec_tokens = []
+            # for note_item in all_notes_list:
+            #     note_ids.append(note_item.get("note_id"))
+            #     xsec_tokens.append(note_item.get("xsec_token"))
+            # await self.batch_get_note_comments(note_ids, xsec_tokens)
+            # endregion
 
     async def fetch_creator_notes_detail(self, note_list: List[Dict]):
         """Concurrently obtain the specified post list and save the data"""

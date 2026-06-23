@@ -28,6 +28,12 @@ from config.db_config import mysql_db_config, sqlite_db_config, postgres_db_conf
 _engines = {}
 
 
+async def close_all_engines():
+    for engine in list(_engines.values()):
+        await engine.dispose()
+    _engines.clear()
+
+
 async def create_database_if_not_exists(db_type: str):
     if db_type == "mysql" or db_type == "db":
         # Connect to the server without a database
@@ -63,7 +69,7 @@ def get_async_engine(db_type: str = None):
     if db_type == "sqlite":
         db_url = f"sqlite+aiosqlite:///{sqlite_db_config['db_path']}"
     elif db_type == "mysql" or db_type == "db":
-        db_url = f"mysql+asyncmy://{mysql_db_config['user']}:{mysql_db_config['password']}@{mysql_db_config['host']}:{mysql_db_config['port']}/{mysql_db_config['db_name']}"
+        db_url = f"mysql+aiomysql://{mysql_db_config['user']}:{mysql_db_config['password']}@{mysql_db_config['host']}:{mysql_db_config['port']}/{mysql_db_config['db_name']}"
     elif db_type == "postgres":
         db_url = f"postgresql+asyncpg://{postgres_db_config['user']}:{postgres_db_config['password']}@{postgres_db_config['host']}:{postgres_db_config['port']}/{postgres_db_config['db_name']}"
     else:

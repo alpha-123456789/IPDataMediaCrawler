@@ -34,7 +34,7 @@ CRAWLER_TYPE = (
 ENABLE_IP_PROXY = False
 
 # Number of proxy IP pools
-IP_PROXY_POOL_COUNT = 2
+IP_PROXY_POOL_COUNT = 1
 
 # Proxy IP provider name
 IP_PROXY_PROVIDER_NAME = "kuaidaili"  # kuaidaili | wandouhttp | static
@@ -87,7 +87,7 @@ CDP_CONNECT_EXISTING = True
 AUTO_CLOSE_BROWSER = True
 
 # Data saving type option configuration, supports: csv, db, json, jsonl, sqlite, excel, postgres. It is best to save to DB, with deduplication function.
-SAVE_DATA_OPTION = "jsonl"  # csv or db or json or jsonl or sqlite or excel or postgres
+SAVE_DATA_OPTION = "db"  # csv or db or json or jsonl or sqlite or excel or postgres
 
 # Data saving path, if not specified by default, it will be saved to the data folder.
 SAVE_DATA_PATH = ""
