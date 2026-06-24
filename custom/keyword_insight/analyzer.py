@@ -20,6 +20,14 @@ def safe_int(val):
 
 class Analyzer:
 
+    # ---------------- 文本清洗 ----------------
+    @staticmethod
+    def clean_text(text):
+        """去除话题标签（如 #早教[话题]#）并清理多余空白"""
+        text = re.sub(r'#[^#]*?\[话题\]#', '', str(text))
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+
     # ---------------- 文本相似度工具 ----------------
     @staticmethod
     def _extract_keywords(text):
@@ -134,22 +142,32 @@ class Analyzer:
 
         return {"ip_roles": ip_roles, "generic_roles": generic_roles}
 
-    def analyze_concerns(self, texts):
-        """分析用户关注点，动态生成子簇视图文本"""
+    def analyze_concerns(self, notes, comments):
+        """分析用户关注点，样本按互动量（点赞+评论）降序排列"""
         result = {}
-
         for concern in CONCERN_RULES:
-            result[concern] = {
-                "count": 0,
-                "samples": []
-            }
+            result[concern] = {"count": 0, "samples": [], "scored_samples": []}
 
-        for text in texts:
+        # 构建带互动分的文本列表（清除话题标签）
+        all_scored = []
+        for n in notes:
+            text = self.clean_text((n.get("title") or "") + (n.get("desc") or ""))
+            if text:
+                score = safe_int(n.get("liked_count")) + safe_int(n.get("comment_count"))
+                all_scored.append((text, score))
+        for c in comments:
+            text = self.clean_text(c.get("content") or "")
+            if text:
+                score = safe_int(c.get("like_count")) + safe_int(c.get("sub_comment_count", 0))
+                all_scored.append((text, score))
+
+        for text, score in all_scored:
             for concern, kws in CONCERN_RULES.items():
                 if any(kw in text for kw in kws):
                     result[concern]["count"] += 1
                     if len(result[concern]["samples"]) < 200:
                         result[concern]["samples"].append(text)
+                        result[concern]["scored_samples"].append((text, score))
 
         return self._build_concern_views(result)
 
@@ -165,11 +183,17 @@ class Analyzer:
             for subcluster_name, kws in cluster_rule.items():
                 count = 0
                 kw_hits = Counter()
+                matched_texts = []
                 for text in samples:
                     hits = [kw for kw in kws if kw in text]
                     if hits:
                         count += 1
                         kw_hits.update(hits)
+                        if len(matched_texts) < 3:
+                            clean = re.sub(r'#.*?#', '', text).strip()
+                            clean = re.sub(r'\s+', ' ', clean)[:60]
+                            if clean and clean not in matched_texts:
+                                matched_texts.append(clean)
 
                 if count > 0:
                     top_kws = [kw for kw, _ in kw_hits.most_common(3)]
@@ -179,6 +203,7 @@ class Analyzer:
                         "percent": round(count * 100 / max(len(samples), 1), 2),
                         "top_keywords": top_kws,
                         "desc": CONCERN_CLUSTER_DESC.get(concern, {}).get(subcluster_name, ""),
+                        "sample_texts": matched_texts,
                     })
 
             subcluster_stats.sort(key=lambda x: x["count"], reverse=True)
@@ -191,11 +216,19 @@ class Analyzer:
                 view = f"{sc['name']}相关讨论占{concern}话题的{sc['percent']}%，主要涉及{kw_display}等关键词。"
                 views.append(view)
 
+            # 按互动量降序，取前 30 条供 LLM 使用
+            scored_samples = sorted(
+                data.get("scored_samples", []),
+                key=lambda x: x[1],
+                reverse=True,
+            )
+
             final_result.append({
                 "concern": concern,
                 "count": data["count"],
                 "views": views,
-                "subclusters": top_subclusters
+                "subclusters": top_subclusters,
+                "raw_samples": [t for t, _ in scored_samples[:30]],
             })
 
         return sorted(final_result, key=lambda x: x["count"], reverse=True)

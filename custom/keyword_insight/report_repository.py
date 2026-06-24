@@ -8,7 +8,7 @@ class ReportRepository:
              topics, roles, concerns, questions,
              sentiment, report,
              engagement, geography, creator_analysis,
-             tags, time_trend):
+             tags, time_trend, mode="template"):
 
         conn = get_conn()
 
@@ -20,8 +20,8 @@ class ReportRepository:
                      topics_json,roles_json,concerns_json,
                      questions_json,sentiment_json,report_content,
                      engagement_json,geography_json,creators_analysis_json,
-                     tags_json,time_trend_json)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                     tags_json,time_trend_json,mode)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     ON DUPLICATE KEY UPDATE
                     note_count=VALUES(note_count),
                     comment_count=VALUES(comment_count),
@@ -36,7 +36,8 @@ class ReportRepository:
                     geography_json=VALUES(geography_json),
                     creators_analysis_json=VALUES(creators_analysis_json),
                     tags_json=VALUES(tags_json),
-                    time_trend_json=VALUES(time_trend_json)
+                    time_trend_json=VALUES(time_trend_json),
+                    mode=VALUES(mode)
                 """, (
                     keyword,
                     len(notes),
@@ -52,7 +53,8 @@ class ReportRepository:
                     json.dumps(geography, ensure_ascii=False),
                     json.dumps(creator_analysis, ensure_ascii=False),
                     json.dumps(tags, ensure_ascii=False),
-                    json.dumps(time_trend, ensure_ascii=False)
+                    json.dumps(time_trend, ensure_ascii=False),
+                    mode,
                 ))
 
             conn.commit()

@@ -46,7 +46,15 @@ class KeywordRepository:
                 """, (keyword,))
                 creators = cur.fetchall()
 
-            return notes, comments, creators
+                cur.execute("""
+                    SELECT COUNT(DISTINCT user_id) AS cnt
+                    FROM xhs_note
+                    WHERE source_keyword=%s
+                """, (keyword,))
+                row = cur.fetchone()
+                creator_count = row["cnt"] if row else 0
+
+            return notes, comments, creators, creator_count
 
         finally:
             conn.close()

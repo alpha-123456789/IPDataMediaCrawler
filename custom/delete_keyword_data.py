@@ -90,14 +90,14 @@ def delete_keyword_data(keyword: str):
 
                 cursor.execute(
                     """
-                    SELECT COUNT(1)
+                    SELECT COUNT(1) AS cnt
                     FROM xhs_note
                     WHERE user_id = %s
                     """,
                     (user_id,)
                 )
 
-                remain_count = cursor.fetchone()[0]
+                remain_count = cursor.fetchone()['cnt']
 
                 if remain_count == 0:
 
@@ -111,6 +111,21 @@ def delete_keyword_data(keyword: str):
                     )
 
             print(f"删除创作者数量: {creator_deleted}")
+
+            # ------------------------------------------------------------------
+            # 删除关键词报告
+            # ------------------------------------------------------------------
+
+            report_deleted = cursor.execute(
+                """
+                DELETE
+                FROM keyword_report
+                WHERE keyword = %s
+                """,
+                (keyword,)
+            )
+
+            print(f"删除关键词报告数量: {report_deleted}")
 
         conn.commit()
 
