@@ -285,7 +285,9 @@ class Analyzer:
             })
 
         # 2. 相似度聚类（基于清理话题标签后的文本）
-        clusters = self._cluster_notes(candidate_notes, threshold=0.45)
+        # 多平台数据量大时限制聚类规模，避免 O(n²) 过慢；按热度优先
+        cluster_candidates = sorted(candidate_notes, key=lambda x: x["heat_score"], reverse=True)[:200]
+        clusters = self._cluster_notes(cluster_candidates, threshold=0.45)
 
         # 3. 从聚类和单帖中选择高频咨询
         selected = []

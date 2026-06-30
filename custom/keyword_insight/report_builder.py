@@ -128,7 +128,7 @@ class ReportBuilder:
             if reference_content else ""
         )
 
-        prompt = f"""你是儿童内容行业的资深用户研究专家，正在分析来自小红书的真实用户反馈数据。
+        prompt = f"""你是儿童内容行业的资深用户研究专家，正在分析来自多个社交平台（小红书、B站、抖音、微博等）的真实用户反馈数据。
 
 {ref_section}关键词：「{keyword}」
 
@@ -266,7 +266,7 @@ class ReportBuilder:
                 if reference_content else ""
             )
 
-            prompt = f"""你是儿童内容行业的资深用户研究专家，正在分析来自小红书的真实用户反馈数据。
+            prompt = f"""你是儿童内容行业的资深用户研究专家，正在分析来自多个社交平台（小红书、B站、抖音、微博等）的真实用户反馈数据。
 
 {ref_section}以下是关键词「{keyword}」的用户反馈分类数据（每类附有原始评论样本）：
 {concerns_block}
