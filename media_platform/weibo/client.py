@@ -33,7 +33,7 @@ import httpx
 from httpx import Response
 from playwright.async_api import BrowserContext, Page
 from tools.httpx_util import make_async_client
-from tenacity import retry, stop_after_attempt, wait_fixed
+from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_fixed
 
 import config
 from proxy.proxy_mixin import ProxyRefreshMixin
@@ -69,7 +69,7 @@ class WeiboClient(ProxyRefreshMixin):
         # Initialize proxy pool (from ProxyRefreshMixin)
         self.init_proxy_pool(proxy_ip_pool)
 
-    @retry(stop=stop_after_attempt(5), wait=wait_fixed(3))
+    @retry(stop=stop_after_attempt(5), wait=wait_fixed(3), retry=retry_if_not_exception_type(DataFetchError))
     async def request(self, method, url, **kwargs) -> Union[Response, Dict]:
         # Check if proxy is expired before each request
         await self._refresh_proxy_if_expired()

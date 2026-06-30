@@ -170,8 +170,12 @@ class KuaishouCrawler(AbstractCrawler):
                     break
                 search_session_id = vision_search_photo.get("searchSessionId", "")
                 for video_detail in vision_search_photo.get("feeds"):
-                    video_id_list.append(video_detail.get("photo", {}).get("id"))
-                    await kuaishou_store.update_kuaishou_video(video_item=video_detail)
+                    if keyword in video_detail.get("photo", {}).get("caption"):
+                        video_id_list.append(video_detail.get("photo", {}).get("id"))
+                        await kuaishou_store.update_kuaishou_video(video_item=video_detail)
+                    else:
+                        utils.logger.info(
+                            f"[KuaishouCrawler.search] Title And Content No Keyword! https://www.kuaishou.com/short-video/{video_detail.get('photo', {}).get('id')}")
 
                 # batch fetch video comments
                 page += 1

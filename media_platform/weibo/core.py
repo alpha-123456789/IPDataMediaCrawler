@@ -38,7 +38,10 @@ from playwright.async_api import (
 
 import config
 from base.base_crawler import AbstractCrawler
+from database.db_session import get_session
+from database.models import WeiboCreator, WeiboNote
 from proxy.proxy_ip_pool import IpInfoModel, create_ip_pool
+from sqlalchemy import select
 from store import weibo as weibo_store
 from tools import utils
 from tools.cdp_browser import CDPBrowserManager
@@ -168,7 +171,11 @@ class WeiboCrawler(AbstractCrawler):
                     page += 1
                     continue
                 utils.logger.info(f"[WeiboCrawler.search] search weibo keyword: {keyword}, page: {page}")
-                search_res = await self.wb_client.get_note_by_keyword(keyword=keyword, page=page, search_type=search_type)
+                try:
+                    search_res = await self.wb_client.get_note_by_keyword(keyword=keyword, page=page, search_type=search_type)
+                except DataFetchError as e:
+                    utils.logger.info(f"[WeiboCrawler.search] 关键词 '{keyword}' 第 {page} 页无内容，停止翻页: {e}")
+                    break
                 note_id_list: List[str] = []
                 note_list = filter_search_result_card(search_res.get("cards"))
                 # If full text fetching is enabled, batch get full text of posts
@@ -176,10 +183,13 @@ class WeiboCrawler(AbstractCrawler):
                 for note_item in note_list:
                     if note_item:
                         mblog: Dict = note_item.get("mblog")
-                        if mblog:
+                        if mblog  and keyword in mblog.get("text"):
                             note_id_list.append(mblog.get("id"))
                             await weibo_store.update_weibo_note(note_item)
                             await self.get_note_images(mblog)
+                        else:
+                            utils.logger.info(
+                                f"[WeiboCrawler.search] Title And Content No Keyword! https://m.weibo.cn/detail/{mblog.get('id')}")
 
                 page += 1
 
@@ -300,6 +310,15 @@ class WeiboCrawler(AbstractCrawler):
                 extension_file_name = url.split(".")[-1]
                 await weibo_store.update_weibo_note_image(pid, content, extension_file_name)
 
+    async def _get_uncrawled_creator_ids(self) -> List[str]:
+        """从 weibo_note 查 user_id，减去 weibo_creator 已有的，返回差集"""
+        async with get_session() as session:
+            note_ids = {row[0] for row in (await session.execute(select(WeiboNote.user_id).distinct())).all() if row[0]}
+            creator_ids = {row[0] for row in (await session.execute(select(WeiboCreator.user_id).distinct())).all() if row[0]}
+        uncrawled = list(note_ids - creator_ids)
+        utils.logger.info(f"[WeiboCrawler._get_uncrawled_creator_ids] 待抓取博主数: {len(uncrawled)}")
+        return uncrawled
+
     async def get_creators_and_notes(self) -> None:
         """
         Get creator's information and their notes and comments
@@ -307,31 +326,38 @@ class WeiboCrawler(AbstractCrawler):
 
         """
         utils.logger.info("[WeiboCrawler.get_creators_and_notes] Begin get weibo creators")
-        for user_id in config.WEIBO_CREATOR_ID_LIST:
-            createor_info_res: Dict = await self.wb_client.get_creator_info_by_id(creator_id=user_id)
+        creator_id_list = await self._get_uncrawled_creator_ids()
+        for user_id in creator_id_list:
+            await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC * 5)
+            try:
+                createor_info_res: Dict = await self.wb_client.get_creator_info_by_id(creator_id=user_id)
+            except DataFetchError as e:
+                utils.logger.warning(f"[WeiboCrawler.get_creators_and_notes] 获取用户 {user_id} 信息失败，跳过: {e}")
+                continue
             if createor_info_res:
                 createor_info: Dict = createor_info_res.get("userInfo", {})
                 utils.logger.info(f"[WeiboCrawler.get_creators_and_notes] creator info: {createor_info}")
                 if not createor_info:
-                    raise DataFetchError("Get creator info error")
+                    utils.logger.warning(f"[WeiboCrawler.get_creators_and_notes] 用户 {user_id} 信息为空，跳过")
+                    continue
                 await weibo_store.save_creator(user_id, user_info=createor_info)
 
                 # Create a wrapper callback to get full text before saving data
-                async def save_notes_with_full_text(note_list: List[Dict]):
-                    # If full text fetching is enabled, batch get full text first
-                    updated_note_list = await self.batch_get_notes_full_text(note_list)
-                    await weibo_store.batch_update_weibo_notes(updated_note_list)
-
-                # Get all note information of the creator
-                all_notes_list = await self.wb_client.get_all_notes_by_creator_id(
-                    creator_id=user_id,
-                    container_id=f"107603{user_id}",
-                    crawl_interval=0,
-                    callback=save_notes_with_full_text,
-                )
-
-                note_ids = [note_item.get("mblog", {}).get("id") for note_item in all_notes_list if note_item.get("mblog", {}).get("id")]
-                await self.batch_get_notes_comments(note_ids)
+                # async def save_notes_with_full_text(note_list: List[Dict]):
+                #     # If full text fetching is enabled, batch get full text first
+                #     updated_note_list = await self.batch_get_notes_full_text(note_list)
+                #     await weibo_store.batch_update_weibo_notes(updated_note_list)
+                #
+                # # Get all note information of the creator
+                # all_notes_list = await self.wb_client.get_all_notes_by_creator_id(
+                #     creator_id=user_id,
+                #     container_id=f"107603{user_id}",
+                #     crawl_interval=0,
+                #     callback=save_notes_with_full_text,
+                # )
+                #
+                # note_ids = [note_item.get("mblog", {}).get("id") for note_item in all_notes_list if note_item.get("mblog", {}).get("id")]
+                # await self.batch_get_notes_comments(note_ids)
 
             else:
                 utils.logger.error(f"[WeiboCrawler.get_creators_and_notes] get creator info error, creator_id:{user_id}")

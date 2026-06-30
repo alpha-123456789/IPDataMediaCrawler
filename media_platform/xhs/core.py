@@ -34,8 +34,11 @@ from tenacity import RetryError
 
 import config
 from base.base_crawler import AbstractCrawler
+from database.db_session import get_session
+from database.models import XhsNote, XhsCreator
 from model.m_xiaohongshu import NoteUrlInfo, CreatorUrlInfo
 from proxy.proxy_ip_pool import IpInfoModel, create_ip_pool
+from sqlalchemy import select
 from store import xhs as xhs_store
 from tools import utils
 from tools.cdp_browser import CDPBrowserManager
@@ -190,26 +193,27 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     utils.logger.error("[XiaoHongShuCrawler.search] Get note detail error")
                     break
 
+    async def _get_uncrawled_creator_ids(self) -> List[str]:
+        """从 xhs_note 查 user_id，减去 xhs_creator 已有的，返回差集"""
+        async with get_session() as session:
+            note_user_ids = {row[0] for row in (await session.execute(select(XhsNote.user_id).distinct())).all() if row[0]}
+            creator_user_ids = {row[0] for row in (await session.execute(select(XhsCreator.user_id).distinct())).all() if row[0]}
+        uncrawled = list(note_user_ids - creator_user_ids)
+        utils.logger.info(f"[XiaoHongShuCrawler._get_uncrawled_creator_ids] 待抓取博主数: {len(uncrawled)}")
+        return uncrawled
+
     async def get_creators_and_notes(self) -> None:
         """Get creator's notes and retrieve their comment information."""
         utils.logger.info("[XiaoHongShuCrawler.get_creators_and_notes] Begin get Xiaohongshu creators")
-        for creator_url in config.XHS_CREATOR_ID_LIST:
-            try:
-                # Parse creator URL to get user_id and security tokens
-                creator_info: CreatorUrlInfo = parse_creator_info_from_url(creator_url)
-                utils.logger.info(f"[XiaoHongShuCrawler.get_creators_and_notes] Parse creator URL info: {creator_info}")
-                user_id = creator_info.user_id
+        creator_id_list = await self._get_uncrawled_creator_ids()
 
-                # get creator detail info from web html content
-                createor_info: Dict = await self.xhs_client.get_creator_info(
-                    user_id=user_id,
-                    xsec_token=creator_info.xsec_token,
-                    xsec_source=creator_info.xsec_source
-                )
-                if createor_info:
-                    await xhs_store.save_creator(user_id, creator=createor_info)
-            except ValueError as e:
-                utils.logger.error(f"[XiaoHongShuCrawler.get_creators_and_notes] Failed to parse creator URL: {e}")
+        for user_id in creator_id_list:
+            await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC * 5)
+            createor_info: Dict = await self.xhs_client.get_creator_info(user_id=user_id)
+            if createor_info:
+                await xhs_store.save_creator(user_id, creator=createor_info)
+            else:
+                utils.logger.warning(f"[XiaoHongShuCrawler.get_creators_and_notes] 获取用户 {user_id} 信息为空，跳过")
                 continue
 
             # region 这里是抓取创作者的笔记，目前不需要，先隐藏

@@ -33,7 +33,10 @@ from playwright.async_api import (
 
 import config
 from base.base_crawler import AbstractCrawler
+from database.db_session import get_session
+from database.models import DouyinAweme, DyCreator
 from proxy.proxy_ip_pool import IpInfoModel, create_ip_pool
+from sqlalchemy import select
 from store import douyin as douyin_store
 from tools import utils
 from tools.cdp_browser import CDPBrowserManager
@@ -167,11 +170,14 @@ class DouYinCrawler(AbstractCrawler):
                         aweme_info: Dict = (post_item.get("aweme_info") or post_item.get("aweme_mix_info", {}).get("mix_items")[0])
                     except TypeError:
                         continue
-                    aweme_list.append(aweme_info.get("aweme_id", ""))
-                    page_aweme_list.append(aweme_info.get("aweme_id", ""))
-                    await douyin_store.update_douyin_aweme(aweme_item=aweme_info)
-                    await self.get_aweme_media(aweme_item=aweme_info)
-                
+
+                    if keyword in aweme_info.get("desc", ""):
+                        aweme_list.append(aweme_info.get("aweme_id", ""))
+                        page_aweme_list.append(aweme_info.get("aweme_id", ""))
+                        await douyin_store.update_douyin_aweme(aweme_item=aweme_info)
+                        await self.get_aweme_media(aweme_item=aweme_info)
+                    else:
+                        utils.logger.info(f"[DouYinCrawler.search] Title And Content No Keyword! https://www.douyin.com/video/{aweme_info.get('aweme_id', '')}")
                 # Batch get note comments for the current page
                 await self.batch_get_note_comments(page_aweme_list)
 
@@ -267,31 +273,37 @@ class DouYinCrawler(AbstractCrawler):
             except DataFetchError as e:
                 utils.logger.error(f"[DouYinCrawler.get_comments] aweme_id: {aweme_id} get comments failed, error: {e}")
 
+    async def _get_uncrawled_creator_ids(self) -> List[str]:
+        """从 douyin_aweme 查 sec_uid，减去 dy_creator 已有的，返回差集"""
+        async with get_session() as session:
+            aweme_sec_uids = {row[0] for row in (await session.execute(select(DouyinAweme.sec_uid).distinct())).all() if row[0]}
+            creator_user_ids = {row[0] for row in (await session.execute(select(DyCreator.user_id).distinct())).all() if row[0]}
+        uncrawled = list(aweme_sec_uids - creator_user_ids)
+        utils.logger.info(f"[DouYinCrawler._get_uncrawled_creator_ids] 待抓取创作者数: {len(uncrawled)}")
+        return uncrawled
+
     async def get_creators_and_videos(self) -> None:
         """
         Get the information and videos of the specified creator from URLs or IDs
         """
         utils.logger.info("[DouYinCrawler.get_creators_and_videos] Begin get douyin creators")
-        utils.logger.info("[DouYinCrawler.get_creators_and_videos] Parsing creator URLs...")
+        creator_id_list = await self._get_uncrawled_creator_ids()
 
-        for creator_url in config.DY_CREATOR_ID_LIST:
-            try:
-                creator_info_parsed = parse_creator_info_from_url(creator_url)
-                user_id = creator_info_parsed.sec_user_id
-                utils.logger.info(f"[DouYinCrawler.get_creators_and_videos] Parsed sec_user_id: {user_id} from {creator_url}")
-            except ValueError as e:
-                utils.logger.error(f"[DouYinCrawler.get_creators_and_videos] Failed to parse creator URL: {e}")
-                continue
-
+        for user_id in creator_id_list:
+            await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC * 5)
             creator_info: Dict = await self.dy_client.get_user_info(user_id)
             if creator_info:
                 await douyin_store.save_creator(user_id, creator=creator_info)
+            else:
+                utils.logger.warning(f"[DouYinCrawler.get_creators_and_videos] 获取用户 {user_id} 信息为空，跳过")
+                continue
 
+            # 用于抓取创作者所有作品，暂不需要
             # Get all video information of the creator
-            all_video_list = await self.dy_client.get_all_user_aweme_posts(sec_user_id=user_id, callback=self.fetch_creator_video_detail)
-
-            video_ids = [video_item.get("aweme_id") for video_item in all_video_list]
-            await self.batch_get_note_comments(video_ids)
+            # all_video_list = await self.dy_client.get_all_user_aweme_posts(sec_user_id=user_id, callback=self.fetch_creator_video_detail)
+            #
+            # video_ids = [video_item.get("aweme_id") for video_item in all_video_list]
+            # await self.batch_get_note_comments(video_ids)
 
     async def fetch_creator_video_detail(self, video_list: List[Dict]):
         """

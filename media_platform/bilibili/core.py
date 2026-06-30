@@ -41,7 +41,10 @@ from playwright._impl._errors import TargetClosedError
 
 import config
 from base.base_crawler import AbstractCrawler
+from database.db_session import get_session
+from database.models import BilibiliVideo, BilibiliUpInfo
 from proxy.proxy_ip_pool import IpInfoModel, create_ip_pool
+from sqlalchemy import select
 from store import bilibili as bilibili_store
 from tools import utils
 from tools.cdp_browser import CDPBrowserManager
@@ -118,17 +121,13 @@ class BilibiliCrawler(AbstractCrawler):
                 # Get the information and comments of the specified post
                 await self.get_specified_videos(config.BILI_SPECIFIED_ID_LIST)
             elif config.CRAWLER_TYPE == "creator":
+                creator_id_list = await self._get_uncrawled_creator_ids()
                 if config.CREATOR_MODE:
-                    for creator_url in config.BILI_CREATOR_ID_LIST:
-                        try:
-                            creator_info = parse_creator_info_from_url(creator_url)
-                            utils.logger.info(f"[BilibiliCrawler.start] Parsed creator ID: {creator_info.creator_id} from {creator_url}")
-                            await self.get_creator_videos(int(creator_info.creator_id))
-                        except ValueError as e:
-                            utils.logger.error(f"[BilibiliCrawler.start] Failed to parse creator URL: {e}")
-                            continue
+                    for creator_id in creator_id_list:
+                        await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC * 5)
+                        await self.get_creator_videos(creator_id)
                 else:
-                    await self.get_all_creator_details(config.BILI_CREATOR_ID_LIST)
+                    await self.get_all_creator_details(creator_id_list)
             else:
                 pass
             utils.logger.info("[BilibiliCrawler.start] Bilibili Crawler finished ...")
@@ -224,11 +223,15 @@ class BilibiliCrawler(AbstractCrawler):
                     utils.logger.warning(f"[BilibiliCrawler.search_by_keywords] error in the task list. The video for this page will not be included. {e}")
                 video_items = await asyncio.gather(*task_list)
                 for video_item in video_items:
-                    if video_item:
+                    if video_item and (keyword in video_item.get("View", {}).get("title", "") or keyword in video_item.get("View", {}).get("desc","")):
                         video_id_list.append(video_item.get("View").get("aid"))
                         await bilibili_store.update_bilibili_video(video_item)
                         await bilibili_store.update_up_info(video_item)
                         await self.get_bilibili_video(video_item, semaphore)
+                    else:
+                        utils.logger.info(
+                            f"[BilibiliCrawler.search_by_keywords] Title And Content No Keyword! https://www.bilibili.com/video/av{video_item.get('View', {}).get('aid', '')}")
+
                 page += 1
 
                 # Sleep after page navigation
@@ -607,23 +610,20 @@ class BilibiliCrawler(AbstractCrawler):
         extension_file_name = f"video.mp4"
         await bilibili_store.store_video(aid, content, extension_file_name)
 
-    async def get_all_creator_details(self, creator_url_list: List[str]):
+    async def _get_uncrawled_creator_ids(self) -> List[int]:
+        """从 bilibili_video 查 user_id，减去 bilibili_up_info 已有的，返回差集"""
+        async with get_session() as session:
+            video_user_ids = {row[0] for row in (await session.execute(select(BilibiliVideo.user_id).distinct())).all() if row[0]}
+            up_info_user_ids = {row[0] for row in (await session.execute(select(BilibiliUpInfo.user_id).distinct())).all() if row[0]}
+        uncrawled = list(video_user_ids - up_info_user_ids)
+        utils.logger.info(f"[BilibiliCrawler._get_uncrawled_creator_ids] 待抓取UP主数: {len(uncrawled)}")
+        return uncrawled
+
+    async def get_all_creator_details(self, creator_id_list: List[int]):
         """
-        creator_url_list: get details for creator from creator URL list
+        get details for creator from creator ID list
         """
         utils.logger.info(f"[BilibiliCrawler.get_all_creator_details] Crawling the details of creators")
-        utils.logger.info(f"[BilibiliCrawler.get_all_creator_details] Parsing creator URLs...")
-
-        creator_id_list = []
-        for creator_url in creator_url_list:
-            try:
-                creator_info = parse_creator_info_from_url(creator_url)
-                creator_id_list.append(int(creator_info.creator_id))
-                utils.logger.info(f"[BilibiliCrawler.get_all_creator_details] Parsed creator ID: {creator_info.creator_id} from {creator_url}")
-            except ValueError as e:
-                utils.logger.error(f"[BilibiliCrawler.get_all_creator_details] Failed to parse creator URL: {e}")
-                continue
-
         utils.logger.info(f"[BilibiliCrawler.get_all_creator_details] creator ids:{creator_id_list}")
 
         semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
