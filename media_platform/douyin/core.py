@@ -40,6 +40,7 @@ from sqlalchemy import select
 from store import douyin as douyin_store
 from tools import utils
 from tools.cdp_browser import CDPBrowserManager
+from tools.crawl_dedup import filter_uncrawled_note_ids
 from var import crawler_type_var, source_keyword_var
 
 from .client import DouYinClient
@@ -165,19 +166,28 @@ class DouYinCrawler(AbstractCrawler):
                     break
                 dy_search_id = posts_res.get("extra", {}).get("logid", "")
                 page_aweme_list = []
+                # Collect candidate aweme_ids for dedup check
+                candidate_awemes = []
                 for post_item in posts_res.get("data"):
                     try:
                         aweme_info: Dict = (post_item.get("aweme_info") or post_item.get("aweme_mix_info", {}).get("mix_items")[0])
                     except TypeError:
                         continue
-
                     if keyword in aweme_info.get("desc", ""):
-                        aweme_list.append(aweme_info.get("aweme_id", ""))
-                        page_aweme_list.append(aweme_info.get("aweme_id", ""))
-                        await douyin_store.update_douyin_aweme(aweme_item=aweme_info)
-                        await self.get_aweme_media(aweme_item=aweme_info)
-                    else:
-                        utils.logger.info(f"[DouYinCrawler.search] Title And Content No Keyword! https://www.douyin.com/video/{aweme_info.get('aweme_id', '')}")
+                        candidate_awemes.append(aweme_info)
+
+                # Filter out already-crawled notes
+                candidate_ids = [a.get("aweme_id", "") for a in candidate_awemes]
+                uncrawled_ids = set(await filter_uncrawled_note_ids("dy", candidate_ids))
+
+                for aweme_info in candidate_awemes:
+                    aweme_id = aweme_info.get("aweme_id", "")
+                    if aweme_id not in uncrawled_ids:
+                        continue
+                    aweme_list.append(aweme_id)
+                    page_aweme_list.append(aweme_id)
+                    await douyin_store.update_douyin_aweme(aweme_item=aweme_info)
+                    await self.get_aweme_media(aweme_item=aweme_info)
                 # Batch get note comments for the current page
                 await self.batch_get_note_comments(page_aweme_list)
 
@@ -290,7 +300,7 @@ class DouYinCrawler(AbstractCrawler):
         creator_id_list = await self._get_uncrawled_creator_ids()
 
         for user_id in creator_id_list:
-            await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC * 5)
+            await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC * 2)
             creator_info: Dict = await self.dy_client.get_user_info(user_id)
             if creator_info:
                 await douyin_store.save_creator(user_id, creator=creator_info)

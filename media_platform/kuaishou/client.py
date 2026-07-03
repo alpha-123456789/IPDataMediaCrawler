@@ -306,6 +306,7 @@ class KuaiShouClient(AbstractApiClient, ProxyRefreshMixin):
                     await callback(photo_id, sub_comments)
                 await asyncio.sleep(crawl_interval)
                 result.extend(sub_comments)
+                break  # Only fetch the first page of sub-comments; remove this line to restore full pagination
         return result
 
     async def get_creator_info(self, user_id: str) -> Dict:

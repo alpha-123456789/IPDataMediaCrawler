@@ -44,8 +44,9 @@ from tools import utils
 from tools.cdp_browser import CDPBrowserManager
 from var import crawler_type_var, source_keyword_var
 
+from tools.crawl_dedup import filter_uncrawled_note_ids
 from .client import XiaoHongShuClient
-from .exception import DataFetchError, NoteNotFoundError
+from .exception import CaptchaError, DataFetchError, NoteNotFoundError
 from .field import SearchSortType
 from .help import parse_note_info_from_note_url, parse_creator_info_from_url, get_search_id
 from .login import XiaoHongShuLogin
@@ -162,6 +163,21 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     if not notes_res or not notes_res.get("has_more", False):
                         utils.logger.info("[XiaoHongShuCrawler.search] No more content!")
                         break
+
+                    # Filter out already-crawled notes before fetching details
+                    candidate_items = [
+                        post_item for post_item in notes_res.get("items", {})
+                        if post_item.get("model_type") not in ("rec_query", "hot_query")
+                    ]
+                    candidate_ids = [item.get("id") for item in candidate_items if item.get("id")]
+                    uncrawled_ids = set(await filter_uncrawled_note_ids("xhs", candidate_ids))
+                    filtered_items = [item for item in candidate_items if item.get("id") in uncrawled_ids]
+
+                    if not filtered_items:
+                        utils.logger.info("[XiaoHongShuCrawler.search] All notes on this page already crawled, skipping")
+                        page += 1
+                        continue
+
                     semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
                     task_list = [
                         self.get_note_detail_async_task(
@@ -169,7 +185,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
                             xsec_source=post_item.get("xsec_source"),
                             xsec_token=post_item.get("xsec_token"),
                             semaphore=semaphore,
-                        ) for post_item in notes_res.get("items", {}) if post_item.get("model_type") not in ("rec_query", "hot_query")
+                        ) for post_item in filtered_items
                     ]
                     note_details = await asyncio.gather(*task_list)
                     for note_detail in note_details:
@@ -189,9 +205,78 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     # Sleep after each page navigation
                     await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
                     utils.logger.info(f"[XiaoHongShuCrawler.search] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after page {page-1}")
-                except DataFetchError:
-                    utils.logger.error("[XiaoHongShuCrawler.search] Get note detail error")
+                except CaptchaError:
+                    await self._wait_for_captcha()
+                    continue
+                except DataFetchError as e:
+                    if any(kw in str(e) for kw in ("登录已过期", "未登录", "请先登录", "login")):
+                        await self._wait_for_relogin()
+                        continue
+                    utils.logger.error(f"[XiaoHongShuCrawler.search] Get note detail error: {e}")
                     break
+
+    async def _wait_for_relogin(self, timeout_seconds: int = 3600) -> None:
+        """登录过期时暂停，每 30 秒检测一次浏览器登录状态，恢复后自动继续。
+        超过 timeout_seconds 仍未登录则退出程序。
+        """
+        utils.logger.warning(
+            "[XiaoHongShuCrawler] 登录已过期，请在浏览器中重新登录，"
+            "程序将每隔 30 秒自动检测登录状态，超过 1 小时未登录将自动退出..."
+        )
+        elapsed = 0
+        interval = 30
+        while elapsed < timeout_seconds:
+            await asyncio.sleep(interval)
+            elapsed += interval
+            try:
+                await self.xhs_client.update_cookies(
+                    browser_context=self.browser_context,
+                    urls=self.cookie_urls,
+                )
+                if await self.xhs_client.pong():
+                    utils.logger.info("[XiaoHongShuCrawler] 检测到重新登录成功，继续抓取...")
+                    return
+                utils.logger.info(
+                    f"[XiaoHongShuCrawler] 登录状态仍未恢复，已等待 {elapsed}s / {timeout_seconds}s..."
+                )
+            except Exception as ex:
+                utils.logger.warning(f"[XiaoHongShuCrawler] 检测登录状态时出错: {ex}，继续等待...")
+        utils.logger.error("[XiaoHongShuCrawler] 等待登录超时（1小时），自动退出程序")
+        raise SystemExit(1)
+
+    async def _wait_for_captcha(self, timeout_seconds: int = 3600) -> None:
+        """验证码出现时暂停，每 30 秒尝试一次请求检测验证是否通过。
+        超过 timeout_seconds 仍未通过则退出程序。
+        """
+        utils.logger.warning(
+            "[XiaoHongShuCrawler] 触发验证码，请在浏览器中完成验证，"
+            "程序将每隔 30 秒自动检测，超过 1 小时未通过将自动退出..."
+        )
+        elapsed = 0
+        interval = 30
+        while elapsed < timeout_seconds:
+            await asyncio.sleep(interval)
+            elapsed += interval
+            try:
+                # 尝试刷新 cookies 并发起一个轻量请求来检测验证是否已通过
+                await self.xhs_client.update_cookies(
+                    browser_context=self.browser_context,
+                    urls=self.cookie_urls,
+                )
+                if await self.xhs_client.pong():
+                    utils.logger.info("[XiaoHongShuCrawler] 验证码已通过，继续抓取...")
+                    return
+                utils.logger.info(
+                    f"[XiaoHongShuCrawler] 验证码仍未通过，已等待 {elapsed}s / {timeout_seconds}s..."
+                )
+            except CaptchaError:
+                utils.logger.info(
+                    f"[XiaoHongShuCrawler] 验证码仍未通过，已等待 {elapsed}s / {timeout_seconds}s..."
+                )
+            except Exception as ex:
+                utils.logger.warning(f"[XiaoHongShuCrawler] 检测验证码状态时出错: {ex}，继续等待...")
+        utils.logger.error("[XiaoHongShuCrawler] 等待验证码超时（1小时），自动退出程序")
+        raise SystemExit(1)
 
     async def _get_uncrawled_creator_ids(self) -> List[str]:
         """从 xhs_note 查 user_id，减去 xhs_creator 已有的，返回差集"""
@@ -208,7 +293,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
         creator_id_list = await self._get_uncrawled_creator_ids()
 
         for user_id in creator_id_list:
-            await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC * 5)
+            await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC * 2)
             createor_info: Dict = await self.xhs_client.get_creator_info(user_id=user_id)
             if createor_info:
                 await xhs_store.save_creator(user_id, creator=createor_info)
@@ -306,7 +391,10 @@ class XiaoHongShuCrawler(AbstractCrawler):
             try:
                 try:
                     note_detail = await self.xhs_client.get_note_by_id(note_id, xsec_source, xsec_token)
-                except RetryError:
+                except RetryError as e:
+                    # CaptchaError 被 tenacity 包装在 RetryError 中，需要解包后向上抛出
+                    if isinstance(e.last_attempt.exception(), CaptchaError):
+                        raise e.last_attempt.exception()
                     pass
 
                 if not note_detail:

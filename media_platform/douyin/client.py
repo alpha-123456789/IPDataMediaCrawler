@@ -307,6 +307,7 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
                         if callback:  # If there is a callback function, execute the callback function
                             await callback(aweme_id, sub_comments)
                         await asyncio.sleep(crawl_interval)
+                        break  # Only fetch the first page of sub-comments; remove this line to restore full pagination
         return result
 
     async def get_user_info(self, sec_user_id: str):

@@ -315,19 +315,24 @@ class BilibiliClient(AbstractApiClient, ProxyRefreshMixin):
             if not isinstance(is_end, bool):
                 utils.logger.warning(f"[BilibiliClient.get_video_all_comments] 'is_end' is not a boolean for video_id: {video_id}. Assuming end of comments.")
                 is_end = True
+
+            # Truncate main comments to respect max_count (only main comments count toward max_count)
+            if len(result) + len(comment_list) > max_count:
+                comment_list = comment_list[:max_count - len(result)]
+
+            # Fetch sub-comments for each main comment (sub-comments don't count toward max_count)
             if is_fetch_sub_comments:
                 for comment in comment_list:
                     comment_id = comment['rpid']
-                    if (comment.get("rcount", 0) > 0):
-                        {await self.get_video_all_level_two_comments(video_id, comment_id, CommentOrderType.DEFAULT, 10, crawl_interval, callback)}
-            if len(result) + len(comment_list) > max_count:
-                comment_list = comment_list[:max_count - len(result)]
-            if callback:  # If there is a callback function, execute it
+                    if comment.get("rcount", 0) > 0:
+                        await self.get_video_all_level_two_comments(
+                            video_id, comment_id, CommentOrderType.DEFAULT, 10, crawl_interval, callback
+                        )
+
+            if callback:
                 await callback(video_id, comment_list)
+            result.extend(comment_list)
             await asyncio.sleep(crawl_interval)
-            if not is_fetch_sub_comments:
-                result.extend(comment_list)
-                continue
         return result
 
     async def get_video_all_level_two_comments(
@@ -357,6 +362,7 @@ class BilibiliClient(AbstractApiClient, ProxyRefreshMixin):
             if callback:  # If there is a callback function, execute it
                 await callback(video_id, comment_list)
             await asyncio.sleep(crawl_interval)
+            break  # Only fetch the first page of sub-comments; remove this line to restore full pagination
             if (int(result["page"]["count"]) <= pn * ps):
                 break
 

@@ -48,6 +48,7 @@ from sqlalchemy import select
 from store import bilibili as bilibili_store
 from tools import utils
 from tools.cdp_browser import CDPBrowserManager
+from tools.crawl_dedup import filter_uncrawled_note_ids
 from var import crawler_type_var, source_keyword_var
 
 from .client import BilibiliClient
@@ -124,7 +125,7 @@ class BilibiliCrawler(AbstractCrawler):
                 creator_id_list = await self._get_uncrawled_creator_ids()
                 if config.CREATOR_MODE:
                     for creator_id in creator_id_list:
-                        await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC * 5)
+                        await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC * 2)
                         await self.get_creator_videos(creator_id)
                 else:
                     await self.get_all_creator_details(creator_id_list)
@@ -215,6 +216,16 @@ class BilibiliCrawler(AbstractCrawler):
                     utils.logger.info(f"[BilibiliCrawler.search_by_keywords] No more videos for '{keyword}', moving to next keyword.")
                     break
 
+                # Filter out already-crawled videos before fetching details
+                candidate_aids = [str(video_item.get("aid", "")) for video_item in video_list]
+                uncrawled_aids = set(await filter_uncrawled_note_ids("bili", candidate_aids))
+                video_list = [v for v in video_list if str(v.get("aid", "")) in uncrawled_aids]
+
+                if not video_list:
+                    utils.logger.info("[BilibiliCrawler.search_by_keywords] All videos on this page already crawled, skipping")
+                    page += 1
+                    continue
+
                 semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
                 task_list = []
                 try:
@@ -223,14 +234,20 @@ class BilibiliCrawler(AbstractCrawler):
                     utils.logger.warning(f"[BilibiliCrawler.search_by_keywords] error in the task list. The video for this page will not be included. {e}")
                 video_items = await asyncio.gather(*task_list)
                 for video_item in video_items:
-                    if video_item and (keyword in video_item.get("View", {}).get("title", "") or keyword in video_item.get("View", {}).get("desc","")):
-                        video_id_list.append(video_item.get("View").get("aid"))
+                    if not video_item:
+                        continue
+                    view = video_item.get("View") or {}
+                    title = view.get("title", "")
+                    desc = view.get("desc", "")
+                    aid = view.get("aid", "")
+                    if keyword in title or keyword in desc:
+                        video_id_list.append(aid)
                         await bilibili_store.update_bilibili_video(video_item)
                         await bilibili_store.update_up_info(video_item)
                         await self.get_bilibili_video(video_item, semaphore)
                     else:
                         utils.logger.info(
-                            f"[BilibiliCrawler.search_by_keywords] Title And Content No Keyword! https://www.bilibili.com/video/av{video_item.get('View', {}).get('aid', '')}")
+                            f"[BilibiliCrawler.search_by_keywords] Title And Content No Keyword! https://www.bilibili.com/video/av{aid}")
 
                 page += 1
 
@@ -293,6 +310,16 @@ class BilibiliCrawler(AbstractCrawler):
                         if not video_list:
                             utils.logger.info(f"[BilibiliCrawler.search] No more videos for '{keyword}' on {day.ctime()}, moving to next day.")
                             break
+
+                        # Filter out already-crawled videos before fetching details
+                        candidate_aids = [str(video_item.get("aid", "")) for video_item in video_list]
+                        uncrawled_aids = set(await filter_uncrawled_note_ids("bili", candidate_aids))
+                        video_list = [v for v in video_list if str(v.get("aid", "")) in uncrawled_aids]
+
+                        if not video_list:
+                            utils.logger.info(f"[BilibiliCrawler.search] All videos on this page already crawled, skipping")
+                            page += 1
+                            continue
 
                         semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
                         task_list = [self.get_video_info_task(aid=video_item.get("aid"), bvid="", semaphore=semaphore) for video_item in video_list]

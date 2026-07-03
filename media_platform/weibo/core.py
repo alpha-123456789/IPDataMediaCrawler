@@ -45,6 +45,7 @@ from sqlalchemy import select
 from store import weibo as weibo_store
 from tools import utils
 from tools.cdp_browser import CDPBrowserManager
+from tools.crawl_dedup import filter_uncrawled_note_ids
 from var import crawler_type_var, source_keyword_var
 
 from .client import WeiboClient
@@ -178,6 +179,18 @@ class WeiboCrawler(AbstractCrawler):
                     break
                 note_id_list: List[str] = []
                 note_list = filter_search_result_card(search_res.get("cards"))
+
+                # Filter out already-crawled notes BEFORE expensive full-text API calls
+                candidate_ids = [
+                    str(note_item.get("mblog", {}).get("id", ""))
+                    for note_item in note_list if note_item and note_item.get("mblog")
+                ]
+                uncrawled_ids = set(await filter_uncrawled_note_ids("wb", candidate_ids))
+                note_list = [
+                    n for n in note_list
+                    if n and n.get("mblog") and str(n.get("mblog", {}).get("id", "")) in uncrawled_ids
+                ]
+
                 # If full text fetching is enabled, batch get full text of posts
                 note_list = await self.batch_get_notes_full_text(note_list)
                 for note_item in note_list:
@@ -328,7 +341,7 @@ class WeiboCrawler(AbstractCrawler):
         utils.logger.info("[WeiboCrawler.get_creators_and_notes] Begin get weibo creators")
         creator_id_list = await self._get_uncrawled_creator_ids()
         for user_id in creator_id_list:
-            await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC * 5)
+            await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC * 2)
             try:
                 createor_info_res: Dict = await self.wb_client.get_creator_info_by_id(creator_id=user_id)
             except DataFetchError as e:

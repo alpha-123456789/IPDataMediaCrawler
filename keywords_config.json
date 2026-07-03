@@ -1,0 +1,132 @@
+{
+    "dy":
+    {
+        "lt": "qrcode",
+        "crawler_max_notes_count": 100,
+        "get_comment": true,
+        "get_sub_comment": true,
+        "max_comments_count_singlenotes": 50,
+        "keywords":
+        [
+            "猴子警长",
+            "小鸡敦敦",
+            "兔子警长",
+            "弗兰熊",
+            "弹弹消防员",
+            "悟空",
+            "蓝星星",
+            "安全警长",
+            "啦咘啦哆警长",
+            "恋与深空",
+            "送鞋广告",
+            "闹闹",
+            "闹闹别闹",
+            "星星徽章",
+            "白虎大帝"
+        ]
+    },
+    "ks":
+    {
+        "lt": "qrcode",
+        "crawler_max_notes_count": 100,
+        "get_comment": true,
+        "get_sub_comment": true,
+        "max_comments_count_singlenotes": 50,
+        "keywords":
+        [
+            "猴子警长",
+            "小鸡敦敦",
+            "兔子警长",
+            "弗兰熊",
+            "弹弹消防员",
+            "悟空",
+            "蓝星星",
+            "安全警长",
+            "啦咘啦哆警长",
+            "恋与深空",
+            "送鞋广告",
+            "闹闹",
+            "闹闹别闹",
+            "星星徽章",
+            "白虎大帝"
+        ]
+    },
+    "xhs":
+    {
+        "lt": "qrcode",
+        "crawler_max_notes_count": 100,
+        "get_comment": true,
+        "get_sub_comment": true,
+        "max_comments_count_singlenotes": 50,
+        "keywords":
+        [
+            "猴子警长",
+            "小鸡敦敦",
+            "兔子警长",
+            "弗兰熊",
+            "弹弹消防员",
+            "悟空",
+            "蓝星星",
+            "安全警长",
+            "啦咘啦哆警长",
+            "恋与深空",
+            "送鞋广告",
+            "闹闹",
+            "闹闹别闹",
+            "星星徽章",
+            "白虎大帝"
+        ]
+    },
+    "wb":
+    {
+        "lt": "qrcode",
+        "crawler_max_notes_count": 100,
+        "get_comment": true,
+        "get_sub_comment": true,
+        "max_comments_count_singlenotes": 50,
+        "keywords":
+        [
+            "猴子警长",
+            "小鸡敦敦",
+            "兔子警长",
+            "弗兰熊",
+            "弹弹消防员",
+            "悟空",
+            "蓝星星",
+            "安全警长",
+            "啦咘啦哆警长",
+            "恋与深空",
+            "送鞋广告",
+            "闹闹",
+            "闹闹别闹",
+            "星星徽章",
+            "白虎大帝"
+        ]
+    },
+    "bili":
+    {
+        "lt": "qrcode",
+        "crawler_max_notes_count": 100,
+        "get_comment": true,
+        "get_sub_comment": true,
+        "max_comments_count_singlenotes": 50,
+        "keywords":
+        [
+            "猴子警长",
+            "小鸡敦敦",
+            "兔子警长",
+            "弗兰熊",
+            "弹弹消防员",
+            "悟空",
+            "蓝星星",
+            "安全警长",
+            "啦咘啦哆警长",
+            "恋与深空",
+            "送鞋广告",
+            "闹闹",
+            "闹闹别闹",
+            "星星徽章",
+            "白虎大帝"
+        ]
+    }
+}

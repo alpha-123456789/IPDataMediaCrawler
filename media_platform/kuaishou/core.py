@@ -40,6 +40,7 @@ from proxy.proxy_ip_pool import IpInfoModel, create_ip_pool
 from store import kuaishou as kuaishou_store
 from tools import utils
 from tools.cdp_browser import CDPBrowserManager
+from tools.crawl_dedup import filter_uncrawled_note_ids
 from var import comment_tasks_var, crawler_type_var, source_keyword_var
 
 from .client import KuaiShouClient
@@ -169,13 +170,26 @@ class KuaishouCrawler(AbstractCrawler):
                     )
                     break
                 search_session_id = vision_search_photo.get("searchSessionId", "")
+
+                # Collect candidates matching keyword
+                candidate_videos = []
                 for video_detail in vision_search_photo.get("feeds"):
                     if keyword in video_detail.get("photo", {}).get("caption"):
-                        video_id_list.append(video_detail.get("photo", {}).get("id"))
-                        await kuaishou_store.update_kuaishou_video(video_item=video_detail)
+                        candidate_videos.append(video_detail)
                     else:
                         utils.logger.info(
                             f"[KuaishouCrawler.search] Title And Content No Keyword! https://www.kuaishou.com/short-video/{video_detail.get('photo', {}).get('id')}")
+
+                # Filter out already-crawled videos
+                candidate_ids = [v.get("photo", {}).get("id") for v in candidate_videos]
+                uncrawled_ids = set(await filter_uncrawled_note_ids("ks", candidate_ids))
+
+                for video_detail in candidate_videos:
+                    video_id = video_detail.get("photo", {}).get("id")
+                    if video_id not in uncrawled_ids:
+                        continue
+                    video_id_list.append(video_id)
+                    await kuaishou_store.update_kuaishou_video(video_item=video_detail)
 
                 # batch fetch video comments
                 page += 1

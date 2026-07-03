@@ -31,3 +31,7 @@ class IPBlockError(RequestError):
 
 class NoteNotFoundError(RequestError):
     """Note does not exist or is abnormal"""
+
+
+class CaptchaError(RequestError):
+    """CAPTCHA verification required"""

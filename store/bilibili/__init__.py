@@ -129,7 +129,7 @@ async def update_bilibili_video_comment(video_id: str, comment_item: Dict):
         "like_count": like_count,
         "last_modify_ts": utils.get_current_timestamp(),
     }
-    utils.logger.info(f"[store.bilibili.update_bilibili_video_comment] Bilibili video comment: {comment_id}, content: {save_comment_item.get('content')}")
+    utils.logger.info(f"[store.bilibili.update_bilibili_video_comment] Bilibili video_id: {video_id}, comment: {comment_id}, content: {save_comment_item.get('content')}")
     await BiliStoreFactory.create_store().store_comment(comment_item=save_comment_item)
 
 

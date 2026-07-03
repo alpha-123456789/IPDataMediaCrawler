@@ -35,7 +35,7 @@ from tools import utils
 if TYPE_CHECKING:
     from proxy.proxy_ip_pool import ProxyIpPool
 
-from .exception import DataFetchError, IPBlockError, NoteNotFoundError
+from .exception import CaptchaError, DataFetchError, IPBlockError, NoteNotFoundError
 from .field import SearchNoteType, SearchSortType
 from .help import get_search_id
 from .extractor import XiaoHongShuExtractor
@@ -112,7 +112,7 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
         self.headers.update(headers)
         return self.headers
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(1), retry=retry_if_not_exception_type(NoteNotFoundError))
+    @retry(stop=stop_after_attempt(3), wait=wait_fixed(1), retry=retry_if_not_exception_type((NoteNotFoundError, CaptchaError)))
     async def request(self, method, url, **kwargs) -> Union[str, Any]:
         """
         Wrapper for httpx common request method, processes request response
@@ -133,12 +133,11 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
             response = await client.request(method, url, timeout=self.timeout, **kwargs)
 
         if response.status_code == 471 or response.status_code == 461:
-            # someday someone maybe will bypass captcha
-            verify_type = response.headers["Verifytype"]
-            verify_uuid = response.headers["Verifyuuid"]
+            verify_type = response.headers.get("Verifytype", "")
+            verify_uuid = response.headers.get("Verifyuuid", "")
             msg = f"CAPTCHA appeared, request failed, Verifytype: {verify_type}, Verifyuuid: {verify_uuid}, Response: {response}"
             utils.logger.error(msg)
-            raise Exception(msg)
+            raise CaptchaError(msg)
 
         if return_response:
             return response.text
@@ -519,6 +518,7 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
                             await callback(note_id, comments)
                         await asyncio.sleep(crawl_interval)
                         result.extend(comments)
+                        break  # Only fetch the first page of sub-comments; remove this line to restore full pagination
                     except DataFetchError as e:
                         utils.logger.warning(
                             f"[XiaoHongShuClient.get_comments_all_sub_comments] Failed to get sub-comments for note_id: {note_id}, root_comment_id: {root_comment_id}, error: {e}. Skipping this comment's sub-comments."
