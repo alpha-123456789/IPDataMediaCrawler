@@ -67,6 +67,7 @@ class DouYinCrawler(AbstractCrawler):
         ]
         self.cdp_manager = None
         self.ip_proxy_pool = None  # Proxy IP pool for automatic proxy refresh
+        config.CRAWLER_MAX_SLEEP_SEC = config.CRAWLER_MAX_SLEEP_SEC * 2
 
     async def start(self) -> None:
         playwright_proxy_format, httpx_proxy_format = None, None
@@ -180,10 +181,12 @@ class DouYinCrawler(AbstractCrawler):
                 candidate_ids = [a.get("aweme_id", "") for a in candidate_awemes]
                 uncrawled_ids = set(await filter_uncrawled_note_ids("dy", candidate_ids))
 
+                seen_aweme_ids = set(aweme_list)
                 for aweme_info in candidate_awemes:
                     aweme_id = aweme_info.get("aweme_id", "")
-                    if aweme_id not in uncrawled_ids:
+                    if aweme_id not in uncrawled_ids or aweme_id in seen_aweme_ids:
                         continue
+                    seen_aweme_ids.add(aweme_id)
                     aweme_list.append(aweme_id)
                     page_aweme_list.append(aweme_id)
                     await douyin_store.update_douyin_aweme(aweme_item=aweme_info)
@@ -300,7 +303,7 @@ class DouYinCrawler(AbstractCrawler):
         creator_id_list = await self._get_uncrawled_creator_ids()
 
         for user_id in creator_id_list:
-            await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC * 2)
+            await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
             creator_info: Dict = await self.dy_client.get_user_info(user_id)
             if creator_info:
                 await douyin_store.save_creator(user_id, creator=creator_info)

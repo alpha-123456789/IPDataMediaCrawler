@@ -4,6 +4,19 @@ from custom.db import get_conn
 
 class ReportRepository:
 
+    def exists(self, keyword):
+        """Check if a report already exists for the given keyword."""
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM keyword_report WHERE keyword=%s LIMIT 1",
+                    (keyword,)
+                )
+                return cur.fetchone() is not None
+        finally:
+            conn.close()
+
     def save(self, keyword, notes, comments, creators,
              topics, roles, concerns, questions,
              sentiment, report,

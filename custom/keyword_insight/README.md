@@ -4,31 +4,49 @@
 
 ## 运行方式
 
-### 1. 模板模式（规则生成，无需 API Key）
+### 单个关键词
 
 ```bash
+# 模板模式（规则生成，无需 API Key）
 uv run .\custom\keyword_insight\run.py 猴子警长
-```
 
-使用规则匹配生成结构化简报，输出话题分布、用户关注点、高频咨询等。
-
-### 2. LLM 模式（AI 生成洞察报告）
-
-```bash
+# LLM 模式（AI 生成洞察报告）
 uv run .\custom\keyword_insight\run.py 猴子警长 --llm
-```
 
-将分析数据交给 Claude 模型，生成 500-700 字的深度用户洞察报告。需要配置 API Key（见下方）。
-
-### 3. LLM 模式 + 参考资料
-
-```bash
+# LLM + 参考资料
 uv run .\custom\keyword_insight\run.py 猴子警长 --llm --ref reference.txt
 ```
 
-在 LLM 分析时额外注入参考文件内容（如竞品研究、行业报告），模型会将用户数据与参考资料交叉印证。
+### 批量生成报告（batch_report.py）
 
-### 4. 分析全部关键词
+从 `crawler_keyword` 表中读取 `status=1` 的关键词，支持全部、指定、按分组三种模式：
+
+```bash
+# 列出所有可用关键词（status=1）
+uv run custom/keyword_insight/batch_report.py --list
+
+# 生成所有启用关键词的报告（已有报告的自动跳过）
+uv run custom/keyword_insight/batch_report.py
+
+# 强制重新生成所有报告（包括已有的）
+uv run custom/keyword_insight/batch_report.py --force
+
+# 只生成指定关键词
+uv run custom/keyword_insight/batch_report.py 猴子警长 小鸡敦敦 弗兰熊
+
+# 按 config.py 中的分组名生成
+uv run custom/keyword_insight/batch_report.py --group 猴子警长系列
+
+# 启用 LLM + 参考资料
+uv run custom/keyword_insight/batch_report.py --llm --ref reference.txt
+
+# LLM + 强制重新生成
+uv run custom/keyword_insight/batch_report.py --llm --force
+```
+
+> **默认行为**：已存在报告的关键词会自动跳过，终端提示 `跳过已有报告：xxx`。加 `--force` / `-f` 可强制覆盖重新生成。
+
+### 分析全部关键词（run.py）
 
 ```bash
 uv run .\custom\keyword_insight\run.py
@@ -39,7 +57,7 @@ uv run .\custom\keyword_insight\run.py --llm
 
 ## 可用关键词
 
-关键词来源于数据库实际数据（通过 `KeywordRepository.get_keywords()` 查询），以下是 `config.py` 中预定义的 IP 系列及其关键词：
+关键词来源于 MySQL 数据库 `crawler_keyword` 表（`status=1`），以下是 `config.py` 中预定义的 IP 系列及其关键词：
 
 | IP 系列 | 代表关键词 |
 |---------|-----------|
@@ -49,7 +67,7 @@ uv run .\custom\keyword_insight\run.py --llm
 | 弹弹消防员系列 | 弹弹消防员、蓝星星、喵小丸… |
 | 依娜恰恰系列 | 依娜恰恰、恰恰公主、依娜公主… |
 
-如果传入的关键词不在数据库中，程序会提示 `关键词 'xxx' 不在数据库中` 并退出。
+如果传入的关键词不在数据库中，程序会提示并跳过。
 
 ## LLM 模式环境变量
 

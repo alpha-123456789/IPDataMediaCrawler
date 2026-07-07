@@ -223,7 +223,7 @@ async def update_dy_aweme_comment(aweme_id: str, comment_item: Dict):
         "parent_comment_id": parent_comment_id,
         "pictures": ",".join(_extract_comment_image_list(comment_item)),
     }
-    utils.logger.info(f"[store.douyin.update_dy_aweme_comment] douyin aweme comment: {comment_id}, content: {save_comment_item.get('content')}")
+    utils.logger.info(f"[store.douyin.update_dy_aweme_comment] douyin aweme_id: {aweme_id}, comment_id: {comment_id}, content: {save_comment_item.get('content')}")
 
     await DouyinStoreFactory.create_store().store_comment(comment_item=save_comment_item)
 
