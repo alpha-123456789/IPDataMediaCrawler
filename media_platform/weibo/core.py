@@ -71,6 +71,13 @@ class WeiboCrawler(AbstractCrawler):
         self.ip_proxy_pool = None  # Proxy IP pool for automatic proxy refresh
 
     async def start(self):
+        # creator 模式：先查有没有待抓取的创作者，没有就直接退出，不启动浏览器
+        if config.CRAWLER_TYPE == "creator":
+            creator_id_list = await self._get_uncrawled_creator_ids()
+            if not creator_id_list:
+                utils.logger.info("[WeiboCrawler.start] 无待抓取创作者，跳过浏览器启动")
+                return
+
         playwright_proxy_format, httpx_proxy_format = None, None
         if config.ENABLE_IP_PROXY:
             self.ip_proxy_pool = await create_ip_pool(config.IP_PROXY_POOL_COUNT, enable_validate_ip=True)

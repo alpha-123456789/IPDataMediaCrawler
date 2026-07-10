@@ -140,17 +140,49 @@ uv run playwright install
 ```shell
 # 在 config/base_config.py 查看配置项目功能，写的有中文注释
 
-# 从配置文件中读取关键词搜索相关的帖子并爬取帖子信息与评论
-uv run main.py --platform xhs --lt qrcode --type search
+# 关键词搜索模式：爬取指定关键词相关的帖子信息与评论
+uv run main.py --platform xhs --lt qrcode --type search --keywords "关键词1,关键词2"
 
-# 从配置文件中读取指定的帖子ID列表获取指定帖子的信息与评论信息
-uv run main.py --platform xhs --lt qrcode --type detail
+# 详情模式：获取指定帖子ID的详情与评论信息
+uv run main.py --platform xhs --lt qrcode --type detail --specified_id "帖子ID"
 
 # 打开对应APP扫二维码登录
 
 # 其他平台爬虫使用示例，执行下面的命令查看
 uv run main.py --help
 ```
+
+### 📋 批量抓取多平台关键词
+
+使用 `crawl_all_keywords.py` 可自动遍历所有平台、从数据库读取启用关键词并批量执行抓取任务：
+
+```shell
+# 常规模式：抓取所有平台的启用关键词（月度去重）
+uv run crawl_all_keywords.py --mode regular
+
+# 实时模式：检查并抓取实时关键词（由外部调度器每隔几小时调用）
+uv run crawl_all_keywords.py --mode realtime
+
+# 仅抓取指定平台
+uv run crawl_all_keywords.py --mode regular --platform xhs
+uv run crawl_all_keywords.py --mode realtime --platform dy
+```
+
+**工作原理：**
+- **关键词来源**：从 MySQL 数据库 `crawler_keyword` 表中读取关键词
+  - 常规模式（regular）：读取 `status=1 AND is_regular=1` 的关键词，通过 `crawl_history.json` 按月去重
+  - 实时模式（realtime）：读取 `status=1 AND is_realtime=1` 的关键词，逐关键词抓取并更新 remark 状态
+- **支持平台**：dy（抖音）、ks（快手）、xhs（小红书）、wb（微博）、bili（B站）
+- **并发防护**：通过 CDP 浏览器端口检测防止多个抓取进程同时运行（对所有入口生效）
+- **共用参数**：所有平台使用统一的抓取参数（可在脚本中修改 `CRAWL_CONFIG`）
+
+**实时模式说明：**
+- 由外部调度器（cron / Windows Task Scheduler）每隔几小时调用 `--mode realtime`
+- 逐关键词抓取，每个关键词独立更新 remark（正在实时抓取 → 实时抓取完成 / 实时抓取失败，等待重新抓取）
+- 临时关键词（`is_regular=0`）：所有平台都成功后自动将 `status` 置为 0；任一平台失败则保留 `status=1`，下次调度自动重试
+- 定期关键词（`is_regular=1`）：写入 `crawl_history.json`，避免常规模式重复抓取
+
+> 💡 **提示**：使用前请确保 `.env` 文件中已正确配置 MySQL 数据库连接信息。
 
 <details>
 <summary>🖥️ <strong>WebUI 可视化操作界面</strong></summary>

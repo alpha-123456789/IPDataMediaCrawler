@@ -47,6 +47,7 @@ from media_platform.weibo import WeiboCrawler
 from media_platform.xhs import XiaoHongShuCrawler
 from media_platform.zhihu import ZhihuCrawler
 from tools.async_file_writer import AsyncFileWriter
+from tools.cdp_guard import is_cdp_browser_running
 from var import crawler_type_var
 
 
@@ -108,6 +109,11 @@ async def main() -> None:
         await db.init_db(args.init_db)
         print(f"Database {args.init_db} initialized successfully.")
         return
+
+    # 检查是否有其他抓取进程正在运行（CDP 端口被占用）
+    if is_cdp_browser_running(config.CDP_DEBUG_PORT):
+        print(f"[Main] CDP 浏览器端口已被占用，有其他抓取进程正在运行，本次启动终止")
+        sys.exit(1)
 
     crawler = CrawlerFactory.create_crawler(platform=config.PLATFORM)
     await crawler.start()
