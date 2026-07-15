@@ -1,23 +1,29 @@
 # -*- coding: utf-8 -*-
-"""CDP 浏览器端口占用检测，用于防止多个抓取进程同时运行。"""
+"""CDP 浏览器端点检测，用于防止多个抓取进程同时运行。"""
 
-import socket
+import json
+from urllib.error import HTTPError, URLError
+from urllib.request import urlopen
 
 
-def is_cdp_browser_running(start_port: int = 9222, scan_range: int = 100) -> bool:
-    """
-    检查是否有 CDP 浏览器实例正在运行（通过检测 debug port 是否被占用）。
-    扫描范围与 browser_launcher.find_available_port() 一致：从 start_port 开始连续 scan_range 个端口。
-    返回 True 表示有端口被占用（即有抓取正在进行）。
+def is_cdp_browser_running(
+    start_port: int = 9222,
+    scan_range: int = 100,
+    timeout: float = 0.05,
+) -> bool:
+    """检查端口范围内是否存在可访问的 Chrome CDP 端点。
+
+    自动启动浏览器时可能使用 start_port 之后的端口，因此保留扫描范围。
+    通过 /json/version 验证 CDP 身份，避免把普通的端口占用误判为抓取进程。
     """
     for port in range(start_port, start_port + scan_range):
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(1)
-            result = sock.connect_ex(("127.0.0.1", port))
-            sock.close()
-            if result == 0:
+            with urlopen(f"http://127.0.0.1:{port}/json/version", timeout=timeout) as response:
+                if response.status != 200:
+                    continue
+                endpoint = json.load(response)
+            if endpoint.get("webSocketDebuggerUrl"):
                 return True
-        except (socket.error, OSError):
-            pass
+        except (HTTPError, URLError, OSError, ValueError, json.JSONDecodeError):
+            continue
     return False

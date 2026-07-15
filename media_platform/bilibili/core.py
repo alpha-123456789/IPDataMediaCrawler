@@ -48,6 +48,7 @@ from sqlalchemy import select
 from store import bilibili as bilibili_store
 from tools import utils
 from tools.cdp_browser import CDPBrowserManager
+from tools.creator_failure_cache import filter_failed_creator_ids, record_creator_failure
 from tools.crawl_dedup import filter_uncrawled_note_ids
 from var import crawler_type_var, source_keyword_var
 
@@ -650,7 +651,7 @@ class BilibiliCrawler(AbstractCrawler):
             up_info_user_ids = {row[0] for row in (await session.execute(select(BilibiliUpInfo.user_id).distinct())).all() if row[0]}
         uncrawled = list(video_user_ids - up_info_user_ids)
         utils.logger.info(f"[BilibiliCrawler._get_uncrawled_creator_ids] 待抓取UP主数: {len(uncrawled)}")
-        return uncrawled
+        return filter_failed_creator_ids("bili", uncrawled)
 
     async def get_all_creator_details(self, creator_id_list: List[int]):
         """
@@ -677,14 +678,23 @@ class BilibiliCrawler(AbstractCrawler):
         :param semaphore:
         :return:
         """
-        async with semaphore:
-            creator_unhandled_info: Dict = await self.bili_client.get_creator_info(creator_id)
-            creator_info: Dict = {
-                "id": creator_id,
-                "name": creator_unhandled_info.get("name"),
-                "sign": creator_unhandled_info.get("sign"),
-                "avatar": creator_unhandled_info.get("face"),
-            }
+        try:
+            async with semaphore:
+                creator_unhandled_info: Dict = await self.bili_client.get_creator_info(creator_id)
+        except DataFetchError as ex:
+            record_creator_failure("bili", creator_id)
+            utils.logger.warning(f"[BilibiliCrawler] 记录失败UP主并跳过: {creator_id}, {ex}")
+            return
+        if not creator_unhandled_info:
+            record_creator_failure("bili", creator_id)
+            utils.logger.warning(f"[BilibiliCrawler] UP主信息为空，已记录并跳过: {creator_id}")
+            return
+        creator_info: Dict = {
+            "id": creator_id,
+            "name": creator_unhandled_info.get("name"),
+            "sign": creator_unhandled_info.get("sign"),
+            "avatar": creator_unhandled_info.get("face"),
+        }
         await self.get_fans(creator_info, semaphore)
         await self.get_followings(creator_info, semaphore)
         await self.get_dynamics(creator_info, semaphore)

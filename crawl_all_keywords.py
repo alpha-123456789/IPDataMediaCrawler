@@ -181,8 +181,6 @@ def ensure_cdp_browser_idle(mode_label: str) -> bool:
 def run_realtime_check(platforms: list):
     """检查并执行实时关键词抓取。"""
     keyword_rows = get_realtime_keywords_with_flag()
-
-    keyword_rows = get_realtime_keywords_with_flag()
     if not keyword_rows:
         print("[REALTIME] 没有需要实时抓取的关键词")
         return

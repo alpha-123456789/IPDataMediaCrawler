@@ -40,6 +40,7 @@ from sqlalchemy import select
 from store import douyin as douyin_store
 from tools import utils
 from tools.cdp_browser import CDPBrowserManager
+from tools.creator_failure_cache import filter_failed_creator_ids, record_creator_failure
 from tools.crawl_dedup import filter_uncrawled_note_ids
 from var import crawler_type_var, source_keyword_var
 
@@ -300,7 +301,7 @@ class DouYinCrawler(AbstractCrawler):
             creator_user_ids = {row[0] for row in (await session.execute(select(DyCreator.user_id).distinct())).all() if row[0]}
         uncrawled = list(aweme_sec_uids - creator_user_ids)
         utils.logger.info(f"[DouYinCrawler._get_uncrawled_creator_ids] 待抓取创作者数: {len(uncrawled)}")
-        return uncrawled
+        return filter_failed_creator_ids("dy", uncrawled)
 
     async def get_creators_and_videos(self) -> None:
         """
@@ -311,11 +312,17 @@ class DouYinCrawler(AbstractCrawler):
 
         for user_id in creator_id_list:
             await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
-            creator_info: Dict = await self.dy_client.get_user_info(user_id)
+            try:
+                creator_info: Dict = await self.dy_client.get_user_info(user_id)
+            except DataFetchError as ex:
+                record_creator_failure("dy", user_id)
+                utils.logger.warning(f"[DouYinCrawler] 记录失败创作者并跳过: {user_id}, {ex}")
+                continue
             if creator_info:
                 await douyin_store.save_creator(user_id, creator=creator_info)
             else:
-                utils.logger.warning(f"[DouYinCrawler.get_creators_and_videos] 获取用户 {user_id} 信息为空，跳过")
+                record_creator_failure("dy", user_id)
+                utils.logger.warning(f"[DouYinCrawler.get_creators_and_videos] 获取用户 {user_id} 信息为空，已记录并跳过")
                 continue
 
             # 用于抓取创作者所有作品，暂不需要

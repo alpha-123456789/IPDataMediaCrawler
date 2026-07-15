@@ -42,6 +42,7 @@ from sqlalchemy import select
 from store import xhs as xhs_store
 from tools import utils
 from tools.cdp_browser import CDPBrowserManager
+from tools.creator_failure_cache import filter_failed_creator_ids, record_creator_failure
 from var import crawler_type_var, source_keyword_var
 
 from tools.crawl_dedup import filter_uncrawled_note_ids
@@ -292,7 +293,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
             creator_user_ids = {row[0] for row in (await session.execute(select(XhsCreator.user_id).distinct())).all() if row[0]}
         uncrawled = list(note_user_ids - creator_user_ids)
         utils.logger.info(f"[XiaoHongShuCrawler._get_uncrawled_creator_ids] 待抓取博主数: {len(uncrawled)}")
-        return uncrawled
+        return filter_failed_creator_ids("xhs", uncrawled)
 
     async def get_creators_and_notes(self) -> None:
         """Get creator's notes and retrieve their comment information."""
@@ -301,11 +302,17 @@ class XiaoHongShuCrawler(AbstractCrawler):
 
         for user_id in creator_id_list:
             await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC * 2)
-            createor_info: Dict = await self.xhs_client.get_creator_info(user_id=user_id)
+            try:
+                createor_info: Dict = await self.xhs_client.get_creator_info(user_id=user_id)
+            except DataFetchError as ex:
+                record_creator_failure("xhs", user_id)
+                utils.logger.warning(f"[XiaoHongShuCrawler] 记录失败博主并跳过: {user_id}, {ex}")
+                continue
             if createor_info:
                 await xhs_store.save_creator(user_id, creator=createor_info)
             else:
-                utils.logger.warning(f"[XiaoHongShuCrawler.get_creators_and_notes] 获取用户 {user_id} 信息为空，跳过")
+                record_creator_failure("xhs", user_id)
+                utils.logger.warning(f"[XiaoHongShuCrawler.get_creators_and_notes] 获取用户 {user_id} 信息为空，已记录并跳过")
                 continue
 
             # region 这里是抓取创作者的笔记，目前不需要，先隐藏

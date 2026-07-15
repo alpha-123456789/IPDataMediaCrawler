@@ -45,6 +45,7 @@ from sqlalchemy import select
 from store import weibo as weibo_store
 from tools import utils
 from tools.cdp_browser import CDPBrowserManager
+from tools.creator_failure_cache import filter_failed_creator_ids, get_failed_creator_ids, record_creator_failure
 from tools.crawl_dedup import filter_uncrawled_note_ids
 from var import crawler_type_var, source_keyword_var
 
@@ -336,8 +337,13 @@ class WeiboCrawler(AbstractCrawler):
             note_ids = {row[0] for row in (await session.execute(select(WeiboNote.user_id).distinct())).all() if row[0]}
             creator_ids = {row[0] for row in (await session.execute(select(WeiboCreator.user_id).distinct())).all() if row[0]}
         uncrawled = list(note_ids - creator_ids)
-        utils.logger.info(f"[WeiboCrawler._get_uncrawled_creator_ids] 待抓取博主数: {len(uncrawled)}")
-        return uncrawled
+        failed_creator_ids = get_failed_creator_ids("weibo")
+        skipped_creator_ids = [user_id for user_id in uncrawled if str(user_id) in failed_creator_ids]
+        if skipped_creator_ids:
+            utils.logger.info(f"[WeiboCrawler] 因已存在失败记录而跳过博主: {skipped_creator_ids}")
+        eligible_creator_ids = filter_failed_creator_ids("weibo", uncrawled)
+        utils.logger.info(f"[WeiboCrawler._get_uncrawled_creator_ids] 待抓取博主数: {len(eligible_creator_ids)}")
+        return eligible_creator_ids
 
     async def get_creators_and_notes(self) -> None:
         """
@@ -352,13 +358,15 @@ class WeiboCrawler(AbstractCrawler):
             try:
                 createor_info_res: Dict = await self.wb_client.get_creator_info_by_id(creator_id=user_id)
             except DataFetchError as e:
-                utils.logger.warning(f"[WeiboCrawler.get_creators_and_notes] 获取用户 {user_id} 信息失败，跳过: {e}")
+                record_creator_failure("weibo", user_id)
+                utils.logger.warning(f"[WeiboCrawler.get_creators_and_notes] 获取用户 {user_id} 信息失败，已记录并跳过: {e}")
                 continue
             if createor_info_res:
                 createor_info: Dict = createor_info_res.get("userInfo", {})
                 utils.logger.info(f"[WeiboCrawler.get_creators_and_notes] creator info: {createor_info}")
                 if not createor_info:
-                    utils.logger.warning(f"[WeiboCrawler.get_creators_and_notes] 用户 {user_id} 信息为空，跳过")
+                    record_creator_failure("weibo", user_id)
+                    utils.logger.warning(f"[WeiboCrawler.get_creators_and_notes] 用户 {user_id} 信息为空，已记录并跳过")
                     continue
                 await weibo_store.save_creator(user_id, user_info=createor_info)
 
@@ -380,7 +388,8 @@ class WeiboCrawler(AbstractCrawler):
                 # await self.batch_get_notes_comments(note_ids)
 
             else:
-                utils.logger.error(f"[WeiboCrawler.get_creators_and_notes] get creator info error, creator_id:{user_id}")
+                record_creator_failure("weibo", user_id)
+                utils.logger.error(f"[WeiboCrawler] 创作者信息为空，已记录并跳过: {user_id}")
 
     async def create_weibo_client(self, httpx_proxy: Optional[str]) -> WeiboClient:
         """Create xhs client"""
