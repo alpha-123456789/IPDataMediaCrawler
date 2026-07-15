@@ -22,6 +22,7 @@
 import argparse
 import sys
 import time
+from datetime import datetime
 
 from custom.keyword_insight.config import IP_KEYWORDS
 from custom.keyword_insight.generator import Generator
@@ -38,7 +39,12 @@ def main():
     parser.add_argument("--ref", type=str, default="", help="参考资料文件路径")
     parser.add_argument("--list", "-l", action="store_true", help="列出数据库中所有可用关键词")
     parser.add_argument("--force", "-f", action="store_true", help="强制重新生成已有报告的关键词（默认跳过）")
+    parser.add_argument("--month", type=str, default=datetime.now().strftime("%Y-%m"), help="报告月份，格式 YYYY-MM，默认当前月")
     args = parser.parse_args()
+    try:
+        datetime.strptime(args.month, "%Y-%m")
+    except ValueError:
+        parser.error("--month 必须为 YYYY-MM")
 
     # 加载参考资料
     reference_content = ""
@@ -99,7 +105,7 @@ def main():
     start_time = time.time()
 
     for i, keyword in enumerate(valid_keywords, 1):
-        if not args.force and report_repo.exists(keyword):
+        if not args.force and report_repo.exists(keyword, args.month):
             print(f"\n[{i}/{len(valid_keywords)}] 跳过已有报告：{keyword}（使用 --force 强制重新生成）")
             skipped += 1
             continue
@@ -107,7 +113,7 @@ def main():
         print(f"\n[{i}/{len(valid_keywords)}] 生成报告：{keyword}")
         print("-" * 40)
         try:
-            generator.run_one(keyword, use_llm=args.llm, reference_content=reference_content)
+            generator.run_one(keyword, use_llm=args.llm, reference_content=reference_content, report_month=args.month)
             success += 1
         except Exception as e:
             print(f"[失败] {keyword}: {e}")

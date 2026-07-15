@@ -1,5 +1,7 @@
 # custom/keyword_insight/repository.py
 
+from datetime import datetime
+
 from custom.db import get_conn
 
 
@@ -45,7 +47,10 @@ class KeywordRepository:
         finally:
             conn.close()
 
-    def load_data(self, keyword):
+    def load_data(self, keyword, report_month):
+        start = datetime.strptime(report_month, "%Y-%m")
+        self._month_start_ts = int(start.timestamp())
+        self._month_end_ts = int((datetime(start.year + (start.month == 12), 1 if start.month == 12 else start.month + 1, 1)).timestamp())
         """从所有平台加载并归一化数据，返回 (notes, comments, creators, creator_count)"""
         loaders = [
             self._load_xhs,
@@ -81,7 +86,7 @@ class KeywordRepository:
     # ──────────────────────────────────────────────
 
     def _load_xhs(self, keyword, cur):
-        cur.execute("SELECT * FROM xhs_note WHERE source_keyword=%s", (keyword,))
+        cur.execute("SELECT * FROM xhs_note WHERE source_keyword=%s AND add_ts >= %s AND add_ts < %s", (keyword, self._month_start_ts, self._month_end_ts))
         raw_notes = cur.fetchall()
         if not raw_notes:
             return [], [], []
@@ -114,7 +119,7 @@ class KeywordRepository:
             "create_time": c.get("create_time"),
             "note_id": _pid("xhs", c.get("note_id")),
             "ip_location": c.get("ip_location"),
-        } for c in cur.fetchall()]
+        } for c in cur.fetchall() if self._month_start_ts <= (c.get("add_ts") or 0) < self._month_end_ts]
 
         cur.execute("""
             SELECT DISTINCT c.*
@@ -128,12 +133,12 @@ class KeywordRepository:
             "gender": c.get("gender"),
             "fans": c.get("fans"),
             "interaction": c.get("interaction"),
-        } for c in cur.fetchall()]
+        } for c in cur.fetchall() if self._month_start_ts <= (c.get("add_ts") or 0) < self._month_end_ts]
 
         return notes, comments, creators
 
     def _load_bilibili(self, keyword, cur):
-        cur.execute("SELECT * FROM bilibili_video WHERE source_keyword=%s", (keyword,))
+        cur.execute("SELECT * FROM bilibili_video WHERE source_keyword=%s AND add_ts >= %s AND add_ts < %s", (keyword, self._month_start_ts, self._month_end_ts))
         raw_notes = cur.fetchall()
         if not raw_notes:
             return [], [], []
@@ -166,7 +171,7 @@ class KeywordRepository:
             "create_time": c.get("create_time"),
             "note_id": _pid("bili", c.get("video_id")),
             "ip_location": "",
-        } for c in cur.fetchall()]
+        } for c in cur.fetchall() if self._month_start_ts <= (c.get("add_ts") or 0) < self._month_end_ts]
 
         user_ids = list(set(str(n["user_id"]) for n in raw_notes if n.get("user_id")))
         creators = []
@@ -182,12 +187,12 @@ class KeywordRepository:
                 "gender": c.get("sex"),
                 "fans": c.get("total_fans"),
                 "interaction": c.get("total_liked"),
-            } for c in cur.fetchall()]
+            } for c in cur.fetchall() if self._month_start_ts <= (c.get("add_ts") or 0) < self._month_end_ts]
 
         return notes, comments, creators
 
     def _load_douyin(self, keyword, cur):
-        cur.execute("SELECT * FROM douyin_aweme WHERE source_keyword=%s", (keyword,))
+        cur.execute("SELECT * FROM douyin_aweme WHERE source_keyword=%s AND add_ts >= %s AND add_ts < %s", (keyword, self._month_start_ts, self._month_end_ts))
         raw_notes = cur.fetchall()
         if not raw_notes:
             return [], [], []
@@ -220,7 +225,7 @@ class KeywordRepository:
             "create_time": c.get("create_time"),
             "note_id": _pid("dy", c.get("aweme_id")),
             "ip_location": c.get("ip_location"),
-        } for c in cur.fetchall()]
+        } for c in cur.fetchall() if self._month_start_ts <= (c.get("add_ts") or 0) < self._month_end_ts]
 
         user_ids = list(set(n["user_id"] for n in raw_notes if n.get("user_id")))
         creators = []
@@ -236,12 +241,12 @@ class KeywordRepository:
                 "gender": c.get("gender"),
                 "fans": c.get("fans"),
                 "interaction": c.get("interaction"),
-            } for c in cur.fetchall()]
+            } for c in cur.fetchall() if self._month_start_ts <= (c.get("add_ts") or 0) < self._month_end_ts]
 
         return notes, comments, creators
 
     def _load_kuaishou(self, keyword, cur):
-        cur.execute("SELECT * FROM kuaishou_video WHERE source_keyword=%s", (keyword,))
+        cur.execute("SELECT * FROM kuaishou_video WHERE source_keyword=%s AND add_ts >= %s AND add_ts < %s", (keyword, self._month_start_ts, self._month_end_ts))
         raw_notes = cur.fetchall()
         if not raw_notes:
             return [], [], []
@@ -274,12 +279,12 @@ class KeywordRepository:
             "create_time": c.get("create_time"),
             "note_id": _pid("ks", c.get("video_id")),
             "ip_location": "",
-        } for c in cur.fetchall()]
+        } for c in cur.fetchall() if self._month_start_ts <= (c.get("add_ts") or 0) < self._month_end_ts]
 
         return notes, comments, []
 
     def _load_weibo(self, keyword, cur):
-        cur.execute("SELECT * FROM weibo_note WHERE source_keyword=%s", (keyword,))
+        cur.execute("SELECT * FROM weibo_note WHERE source_keyword=%s AND add_ts >= %s AND add_ts < %s", (keyword, self._month_start_ts, self._month_end_ts))
         raw_notes = cur.fetchall()
         if not raw_notes:
             return [], [], []
@@ -312,7 +317,7 @@ class KeywordRepository:
             "create_time": c.get("create_time"),
             "note_id": _pid("wb", c.get("note_id")),
             "ip_location": c.get("ip_location"),
-        } for c in cur.fetchall()]
+        } for c in cur.fetchall() if self._month_start_ts <= (c.get("add_ts") or 0) < self._month_end_ts]
 
         user_ids = list(set(n["user_id"] for n in raw_notes if n.get("user_id")))
         creators = []
@@ -328,12 +333,12 @@ class KeywordRepository:
                 "gender": c.get("gender"),
                 "fans": c.get("fans"),
                 "interaction": "0",
-            } for c in cur.fetchall()]
+            } for c in cur.fetchall() if self._month_start_ts <= (c.get("add_ts") or 0) < self._month_end_ts]
 
         return notes, comments, creators
 
     def _load_tieba(self, keyword, cur):
-        cur.execute("SELECT * FROM tieba_note WHERE source_keyword=%s", (keyword,))
+        cur.execute("SELECT * FROM tieba_note WHERE source_keyword=%s AND add_ts >= %s AND add_ts < %s", (keyword, self._month_start_ts, self._month_end_ts))
         raw_notes = cur.fetchall()
         if not raw_notes:
             return [], [], []
@@ -366,12 +371,12 @@ class KeywordRepository:
             "create_time": None,
             "note_id": _pid("tieba", c.get("note_id")),
             "ip_location": c.get("ip_location"),
-        } for c in cur.fetchall()]
+        } for c in cur.fetchall() if self._month_start_ts <= (c.get("add_ts") or 0) < self._month_end_ts]
 
         return notes, comments, []
 
     def _load_zhihu(self, keyword, cur):
-        cur.execute("SELECT * FROM zhihu_content WHERE source_keyword=%s", (keyword,))
+        cur.execute("SELECT * FROM zhihu_content WHERE source_keyword=%s AND add_ts >= %s AND add_ts < %s", (keyword, self._month_start_ts, self._month_end_ts))
         raw_notes = cur.fetchall()
         if not raw_notes:
             return [], [], []
@@ -404,7 +409,7 @@ class KeywordRepository:
             "create_time": None,
             "note_id": _pid("zhihu", c.get("content_id")),
             "ip_location": c.get("ip_location"),
-        } for c in cur.fetchall()]
+        } for c in cur.fetchall() if self._month_start_ts <= (c.get("add_ts") or 0) < self._month_end_ts]
 
         user_ids = list(set(n["user_id"] for n in raw_notes if n.get("user_id")))
         creators = []
@@ -420,6 +425,6 @@ class KeywordRepository:
                 "gender": c.get("gender"),
                 "fans": str(c.get("fans") or 0),
                 "interaction": str(c.get("get_voteup_count") or 0),
-            } for c in cur.fetchall()]
+            } for c in cur.fetchall() if self._month_start_ts <= (c.get("add_ts") or 0) < self._month_end_ts]
 
         return notes, comments, creators
