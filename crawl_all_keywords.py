@@ -38,20 +38,31 @@ def save_json(path: Path, data):
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def get_enabled_keywords() -> list:
-    """从 crawler_keyword 表获取常规月度抓取的关键词: status=1 AND is_regular=1"""
+def get_regular_keywords_with_flag() -> list:
+    """获取常规模式关键词及其是否为一次性关键词。
+
+    常规定期关键词：status=1 AND is_regular=1。
+    一次性关键词：status=1 AND is_regular=0 AND is_realtime=0；
+    在所有目标平台抓取成功后会被自动禁用。
+    """
     conn = get_conn()
     try:
         with conn.cursor() as cursor:
             cursor.execute("""
-                SELECT keyword
+                SELECT keyword, is_regular, is_realtime
                 FROM crawler_keyword
                 WHERE status = 1
-                  AND is_regular = 1
+                  AND (
+                      is_regular = 1
+                      OR (is_regular = 0 AND is_realtime = 0)
+                  )
             """)
             rows = cursor.fetchall()
             return [
-                row['keyword'].strip()
+                {
+                    "keyword": row['keyword'].strip(),
+                    "is_one_time": row['is_regular'] == 0 and row['is_realtime'] == 0,
+                }
                 for row in rows
                 if row['keyword'] and row['keyword'].strip()
             ]
@@ -98,7 +109,7 @@ def update_remark(keywords: list, remark: str):
 
 
 def disable_temp_keywords(keywords: list):
-    """将 is_regular=0 的临时关键词 status 设为 0"""
+    """将实时模式中 is_regular=0 的临时关键词 status 设为 0。"""
     if not keywords:
         return
     conn = get_conn()
@@ -110,6 +121,26 @@ def disable_temp_keywords(keywords: list):
                 SET status = 0
                 WHERE keyword IN ({placeholders})
                   AND is_regular = 0
+            """, keywords)
+            conn.commit()
+    finally:
+        conn.close()
+
+
+def disable_one_time_keywords(keywords: list):
+    """将 regular 模式中已完成的一次性关键词 status 设为 0。"""
+    if not keywords:
+        return
+    conn = get_conn()
+    try:
+        with conn.cursor() as cursor:
+            placeholders = ",".join(["%s"] * len(keywords))
+            cursor.execute(f"""
+                UPDATE crawler_keyword
+                SET status = 0
+                WHERE keyword IN ({placeholders})
+                  AND is_regular = 0
+                  AND is_realtime = 0
             """, keywords)
             conn.commit()
     finally:
@@ -232,10 +263,12 @@ def main():
         return
 
     # === 以下为常规模式（regular）===
-    # 从数据库获取启用的关键词（status=1），自动跳过禁用关键词
-    db_keywords = get_enabled_keywords()
-    if not db_keywords:
-        print("[WARN] crawler_keyword 表中没有启用的关键词(status=1)")
+    # 常规定期关键词，以及 regular 模式下的一次性关键词。
+    keyword_rows = get_regular_keywords_with_flag()
+    db_keywords = [row["keyword"] for row in keyword_rows]
+    one_time_keywords = [row["keyword"] for row in keyword_rows if row["is_one_time"]]
+    if not keyword_rows:
+        print("[WARN] crawler_keyword 表中没有可供常规模式抓取的关键词")
 
     history: dict = load_json(HISTORY_FILE, {})
     current_month = datetime.now().strftime("%Y-%m")
@@ -271,6 +304,18 @@ def main():
             for keyword in pending_keywords:
                 failed += 1
             print(f"[FAIL] {platform} / {pending_keywords}  (exit code non-zero, will retry next run)")
+
+    # 一次性关键词只有在所有支持的平台均抓取成功后才禁用。
+    # 即使本次使用 --platform 指定单个平台，也不会提前禁用。
+    # 若任一平台失败则保留 status=1，供下次 regular 任务重试。
+    completed_one_time_keywords = [
+        keyword
+        for keyword in one_time_keywords
+        if all(history.get(platform, {}).get(keyword) == current_month for platform in PLATFORMS)
+    ]
+    disable_one_time_keywords(completed_one_time_keywords)
+    if completed_one_time_keywords:
+        print(f"[REGULAR] 已将一次性关键词 status 置为 0: {completed_one_time_keywords}")
 
     print(f"\n{'='*60}")
     print(f"Summary: total={total}  skipped={skipped}  success={success}  failed={failed}")

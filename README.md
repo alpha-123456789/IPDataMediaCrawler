@@ -170,7 +170,7 @@ uv run crawl_all_keywords.py --mode realtime --platform dy
 
 **工作原理：**
 - **关键词来源**：从 MySQL 数据库 `crawler_keyword` 表中读取关键词
-  - 常规模式（regular）：读取 `status=1 AND is_regular=1` 的关键词，通过 `crawl_history.json` 按月去重
+  - 常规模式（regular）：读取 `status=1 AND is_regular=1` 的定期关键词，以及 `status=1 AND is_regular=0 AND is_realtime=0` 的一次性关键词；通过 `crawl_history.json` 按月去重
   - 实时模式（realtime）：读取 `status=1 AND is_realtime=1` 的关键词，逐关键词抓取并更新 remark 状态
 - **支持平台**：dy（抖音）、ks（快手）、xhs（小红书）、wb（微博）、bili（B站）
 - **并发防护**：通过 CDP 浏览器端口检测防止多个抓取进程同时运行（对所有入口生效）
@@ -181,6 +181,7 @@ uv run crawl_all_keywords.py --mode realtime --platform dy
 - 逐关键词抓取，每个关键词独立更新 remark（正在实时抓取 → 实时抓取完成 / 实时抓取失败，等待重新抓取）
 - 临时关键词（`is_regular=0`）：所有平台都成功后自动将 `status` 置为 0；任一平台失败则保留 `status=1`，下次调度自动重试
 - 定期关键词（`is_regular=1`）：写入 `crawl_history.json`，避免常规模式重复抓取
+- 一次性常规关键词（`is_regular=0 AND is_realtime=0`）：在 regular 模式下所有平台成功后自动将 `status` 置为 0，因此后续月份不会再抓取
 
 > 💡 **提示**：使用前请确保 `.env` 文件中已正确配置 MySQL 数据库连接信息。
 
