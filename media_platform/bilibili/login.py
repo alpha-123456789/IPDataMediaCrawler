@@ -95,7 +95,7 @@ class BilibiliLogin(AbstractLogin):
         )
         if not base64_qrcode_img:
             utils.logger.info("[BilibiliLogin.login_by_qrcode] login failed , have not found qrcode please check ....")
-            sys.exit()
+            sys.exit(1)
 
         # show login qrcode
         partial_show_qrcode = functools.partial(utils.show_qrcode, base64_qrcode_img)
@@ -106,7 +106,7 @@ class BilibiliLogin(AbstractLogin):
             await self.check_login_state()
         except RetryError:
             utils.logger.info("[BilibiliLogin.login_by_qrcode] Login bilibili failed by qrcode login method ...")
-            sys.exit()
+            sys.exit(1)
 
         wait_redirect_seconds = 5
         utils.logger.info(

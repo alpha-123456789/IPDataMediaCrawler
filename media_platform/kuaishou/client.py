@@ -21,6 +21,7 @@
 # -*- coding: utf-8 -*-
 import asyncio
 import json
+import random
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 from urllib.parse import urlencode
 
@@ -38,6 +39,11 @@ if TYPE_CHECKING:
 
 from .exception import DataFetchError
 from .graphql import KuaiShouGraphQL
+from .help import get_ks_sign_from_playwright
+
+
+REQUEST_MAX_ATTEMPTS = 3
+REQUEST_RETRY_BASE_DELAY_SECONDS = 2
 
 
 class KuaiShouClient(AbstractApiClient, ProxyRefreshMixin):
@@ -63,12 +69,35 @@ class KuaiShouClient(AbstractApiClient, ProxyRefreshMixin):
         # Initialize proxy pool (from ProxyRefreshMixin)
         self.init_proxy_pool(proxy_ip_pool)
 
+    async def _send_request_with_retry(self, method: str, url: str, **kwargs) -> httpx.Response:
+        for attempt in range(1, REQUEST_MAX_ATTEMPTS + 1):
+            try:
+                async with make_async_client(proxy=self.proxy) as client:
+                    return await client.request(
+                        method,
+                        url,
+                        timeout=self.timeout,
+                        **kwargs,
+                    )
+            except httpx.RequestError as exc:
+                if attempt >= REQUEST_MAX_ATTEMPTS:
+                    raise
+
+                retry_delay = REQUEST_RETRY_BASE_DELAY_SECONDS * attempt
+                utils.logger.warning(
+                    f"[KuaiShouClient.request] Request failed ({type(exc).__name__}), "
+                    f"retrying in {retry_delay} seconds "
+                    f"({attempt}/{REQUEST_MAX_ATTEMPTS}): {url}"
+                )
+                await asyncio.sleep(retry_delay)
+
+        raise RuntimeError("[KuaiShouClient.request] Request completed without a response")
+
     async def request(self, method, url, **kwargs) -> Any:
         # Check if proxy is expired before each request
         await self._refresh_proxy_if_expired()
 
-        async with make_async_client(proxy=self.proxy) as client:
-            response = await client.request(method, url, timeout=self.timeout, **kwargs)
+        response = await self._send_request_with_retry(method, url, **kwargs)
         data: Dict = response.json()
         if data.get("errors"):
             raise DataFetchError(data.get("errors", "unkonw error"))
@@ -84,6 +113,41 @@ class KuaiShouClient(AbstractApiClient, ProxyRefreshMixin):
         )
 
     async def post(self, uri: str, data: dict) -> Dict:
+        """Send GraphQL requests from the active browser page.
+
+        Kuaishou validates more than its Cookie header for GraphQL requests. Sending
+        these calls through the logged-in page preserves the browser's session and
+        network fingerprint, while REST comment requests keep using HTTPX below.
+        """
+        result = await self.playwright_page.evaluate(
+            """async ({ url, payload }) => {
+                const response = await fetch(url, {
+                    method: "POST",
+                    credentials: "include",
+                    headers: {
+                        "Content-Type": "application/json;charset=UTF-8",
+                    },
+                    body: JSON.stringify(payload),
+                });
+                return {
+                    status: response.status,
+                    text: await response.text(),
+                };
+            }""",
+            {"url": f"{self._host}{uri}", "payload": data},
+        )
+        if result["status"] >= 400:
+            raise DataFetchError(
+                f"GraphQL HTTP {result['status']}: {result['text'][:500]}"
+            )
+
+        response_data: Dict = json.loads(result["text"])
+        if response_data.get("errors"):
+            raise DataFetchError(response_data["errors"])
+        return response_data.get("data", {})
+
+    async def post_via_httpx(self, uri: str, data: dict) -> Dict:
+        """Fallback HTTPX GraphQL request retained for callers without a page."""
         json_str = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
         return await self.request(
             method="POST", url=f"{self._host}{uri}", data=json_str, headers=self.headers
@@ -99,18 +163,70 @@ class KuaiShouClient(AbstractApiClient, ProxyRefreshMixin):
         await self._refresh_proxy_if_expired()
 
         json_str = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
-        async with make_async_client(proxy=self.proxy) as client:
-            response = await client.request(
-                method="POST",
-                url=f"{self._rest_host}{uri}",
-                data=json_str,
-                timeout=self.timeout,
-                headers=self.headers,
-            )
+        response = await self._send_request_with_retry(
+            method="POST",
+            url=f"{self._rest_host}{uri}",
+            data=json_str,
+            headers=self.headers,
+        )
         result: Dict = response.json()
         if result.get("result") != 1:
             raise DataFetchError(f"REST API V2 error: {result}")
         return result
+
+    async def request_rest_v2_signed(self, uri: str, data: dict) -> Dict:
+        """Request a signed Kuaishou REST list endpoint.
+
+        Kuaishou moved search and profile-feed listing endpoints away from GraphQL.
+        Each request requires a short-lived ``__NS_hxfalcon`` signature generated
+        by the already loaded browser page.
+        """
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            await self._refresh_proxy_if_expired()
+            signature = await get_ks_sign_from_playwright(
+                self.playwright_page,
+                uri,
+                {"caver": 2},
+                data,
+            )
+            json_str = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+            response = await self._send_request_with_retry(
+                method="POST",
+                url=(
+                    f"{self._rest_host}{uri}"
+                    f"?__NS_hxfalcon={signature}&caver=2"
+                ),
+                data=json_str,
+                headers=self.headers,
+            )
+            result: Dict = response.json()
+            if result.get("result") == 1:
+                return result
+            if result.get("result") != 2:
+                raise DataFetchError(f"REST API V2 error: {result}")
+
+            delay = 5 * (2**attempt) + random.uniform(0, 2)
+            utils.logger.warning(
+                "[KuaiShouClient.request_rest_v2_signed] rate limited "
+                f"(result:2) on {uri}, retry in {delay:.1f}s, "
+                f"attempt {attempt + 1}/{max_attempts}"
+            )
+            await asyncio.sleep(delay)
+
+        raise DataFetchError(f"REST API V2 error: {result}")
+
+    async def search_info_by_keyword_v2(
+        self, keyword: str, pcursor: str, search_session_id: str = ""
+    ) -> Dict:
+        """Search videos through Kuaishou's signed REST endpoint."""
+        post_data = {
+            "keyword": keyword,
+            "pcursor": pcursor,
+            "page": "search",
+            "searchSessionId": search_session_id,
+        }
+        return await self.request_rest_v2_signed("/rest/v/search/feed", post_data)
 
     async def pong(self) -> bool:
         """get a note to check if login state is ok"""

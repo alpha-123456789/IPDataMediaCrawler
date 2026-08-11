@@ -7,6 +7,7 @@
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime
@@ -14,17 +15,21 @@ from pathlib import Path
 
 from custom.db import get_conn
 from tools.cdp_guard import is_cdp_browser_running
+from tools.crawl_progress import (
+    PROGRESS_ENV,
+    parse_keyword_completed_event,
+)
 
 HISTORY_FILE = Path("crawl_history.json")
 
 # 所有平台共用的抓取参数
-PLATFORMS = ["dy", "ks", "xhs", "wb", "bili"]
+PLATFORMS = ["dy", "ks", "wb", "bili", "xhs"]
 CRAWL_CONFIG = {
     "lt": "qrcode",
     "crawler_max_notes_count": 100,
     "get_comment": True,
-    "get_sub_comment": True,
-    "max_comments_count_singlenotes": 50,
+    "get_sub_comment": False,
+    "max_comments_count_singlenotes": 20,
 }
 
 
@@ -35,7 +40,12 @@ def load_json(path: Path, default):
 
 
 def save_json(path: Path, data):
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path = path.with_suffix(f"{path.suffix}.tmp")
+    with temp_path.open("w", encoding="utf-8") as file:
+        file.write(json.dumps(data, ensure_ascii=False, indent=2))
+        file.flush()
+        os.fsync(file.fileno())
+    os.replace(temp_path, path)
 
 
 def get_regular_keywords_with_flag() -> list:
@@ -147,7 +157,7 @@ def disable_one_time_keywords(keywords: list):
         conn.close()
 
 
-def run_crawl(platform: str, keywords: list) -> bool:
+def run_crawl(platform: str, keywords: list, on_keyword_completed=None) -> bool:
     """Run a single crawl session for a platform with multiple keywords (comma-separated)."""
     cmd = [
         "uv", "run", "main.py",
@@ -166,8 +176,39 @@ def run_crawl(platform: str, keywords: list) -> bool:
     print(f"      cmd: {' '.join(cmd)}")
     print(f"{'='*60}")
 
-    result = subprocess.run(cmd)
-    return result.returncode == 0
+    env = os.environ.copy()
+    if on_keyword_completed:
+        env[PROGRESS_ENV] = "1"
+
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+        env=env,
+    )
+    if process.stdout is None:
+        raise RuntimeError("Unable to read crawler subprocess output")
+
+    for raw_line in process.stdout:
+        line = raw_line.rstrip("\r\n")
+        event = parse_keyword_completed_event(line)
+        if event:
+            if (
+                on_keyword_completed
+                and event["platform"] == platform
+                and event["keyword"] in keywords
+            ):
+                on_keyword_completed(event["keyword"])
+            else:
+                print(f"[WARN] Ignored invalid crawler progress event: {event}")
+            continue
+        print(line, flush=True)
+
+    return process.wait() == 0
 
 
 def ensure_cdp_browser_idle(mode_label: str) -> bool:
@@ -234,6 +275,82 @@ def run_realtime_check(platforms: list):
         print(f"[REALTIME] 已将临时关键词 status 置为 0: {success_temp_keywords}")
 
 
+def run_regular_check(platforms: list, keyword_rows: list) -> dict:
+    """Run regular crawls and checkpoint each completed platform/keyword pair."""
+    db_keywords = [row["keyword"] for row in keyword_rows]
+    one_time_keywords = [row["keyword"] for row in keyword_rows if row["is_one_time"]]
+
+    history: dict = load_json(HISTORY_FILE, {})
+    current_month = datetime.now().strftime("%Y-%m")
+    total = skipped = success = failed = 0
+
+    for platform in platforms:
+        platform_history: dict = history.setdefault(platform, {})
+        pending_keywords = []
+        for keyword in db_keywords:
+            total += 1
+            if platform_history.get(keyword) == current_month:
+                print(f"[SKIP] {platform} / {keyword}  (already crawled in {current_month})")
+                skipped += 1
+            else:
+                pending_keywords.append(keyword)
+
+        if not pending_keywords:
+            continue
+
+        completed_keywords = set()
+
+        def checkpoint_keyword(keyword: str) -> None:
+            nonlocal success
+            if keyword in completed_keywords:
+                return
+
+            completed_keywords.add(keyword)
+            platform_history[keyword] = current_month
+            save_json(HISTORY_FILE, history)
+            success += 1
+            print(f"[DONE] {platform} / {keyword}  (history checkpoint saved)")
+
+        process_ok = run_crawl(
+            platform,
+            pending_keywords,
+            on_keyword_completed=checkpoint_keyword,
+        )
+        incomplete_keywords = [
+            keyword for keyword in pending_keywords if keyword not in completed_keywords
+        ]
+        if incomplete_keywords:
+            failed += len(incomplete_keywords)
+            state = "exit code non-zero" if not process_ok else "no completion checkpoint"
+            print(
+                f"[FAIL] {platform} / {incomplete_keywords}  "
+                f"({state}, will retry next run)"
+            )
+
+    completed_one_time_keywords = [
+        keyword
+        for keyword in one_time_keywords
+        if all(history.get(platform, {}).get(keyword) == current_month for platform in PLATFORMS)
+    ]
+    disable_one_time_keywords(completed_one_time_keywords)
+    if completed_one_time_keywords:
+        print(f"[REGULAR] 已将一次性关键词 status 置为 0: {completed_one_time_keywords}")
+
+    summary = {
+        "total": total,
+        "skipped": skipped,
+        "success": success,
+        "failed": failed,
+    }
+    print(f"\n{'='*60}")
+    print(
+        f"Summary: total={summary['total']}  skipped={summary['skipped']}  "
+        f"success={summary['success']}  failed={summary['failed']}"
+    )
+    print(f"{'='*60}")
+    return summary
+
+
 def main():
     parser = argparse.ArgumentParser(description="按平台批量抓取关键词")
     parser.add_argument("--platform", "-p", type=str, default=None,
@@ -263,61 +380,9 @@ def main():
     # === 以下为常规模式（regular）===
     # 常规定期关键词，以及 regular 模式下的一次性关键词。
     keyword_rows = get_regular_keywords_with_flag()
-    db_keywords = [row["keyword"] for row in keyword_rows]
-    one_time_keywords = [row["keyword"] for row in keyword_rows if row["is_one_time"]]
     if not keyword_rows:
         print("[WARN] crawler_keyword 表中没有可供常规模式抓取的关键词")
-
-    history: dict = load_json(HISTORY_FILE, {})
-    current_month = datetime.now().strftime("%Y-%m")
-
-    total = skipped = success = failed = 0
-
-    for platform in platforms:
-        platform_history: dict = history.setdefault(platform, {})
-
-        # 使用数据库中的启用关键词，过滤掉禁用的
-        pending_keywords = []
-        for keyword in db_keywords:
-            total += 1
-            if platform_history.get(keyword) == current_month:
-                print(f"[SKIP] {platform} / {keyword}  (already crawled in {current_month})")
-                skipped += 1
-            else:
-                pending_keywords.append(keyword)
-
-        if not pending_keywords:
-            continue
-
-        # Run all pending keywords in a single session (shared browser)
-        ok = run_crawl(platform, pending_keywords)
-
-        if ok:
-            for keyword in pending_keywords:
-                platform_history[keyword] = current_month
-                success += 1
-            save_json(HISTORY_FILE, history)
-            print(f"[DONE] {platform} / {pending_keywords}")
-        else:
-            for keyword in pending_keywords:
-                failed += 1
-            print(f"[FAIL] {platform} / {pending_keywords}  (exit code non-zero, will retry next run)")
-
-    # 一次性关键词只有在所有支持的平台均抓取成功后才禁用。
-    # 即使本次使用 --platform 指定单个平台，也不会提前禁用。
-    # 若任一平台失败则保留 status=1，供下次 regular 任务重试。
-    completed_one_time_keywords = [
-        keyword
-        for keyword in one_time_keywords
-        if all(history.get(platform, {}).get(keyword) == current_month for platform in PLATFORMS)
-    ]
-    disable_one_time_keywords(completed_one_time_keywords)
-    if completed_one_time_keywords:
-        print(f"[REGULAR] 已将一次性关键词 status 置为 0: {completed_one_time_keywords}")
-
-    print(f"\n{'='*60}")
-    print(f"Summary: total={total}  skipped={skipped}  success={success}  failed={failed}")
-    print(f"{'='*60}")
+    run_regular_check(platforms, keyword_rows)
 
 
 if __name__ == "__main__":

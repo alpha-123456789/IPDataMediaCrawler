@@ -24,7 +24,13 @@ from urllib.parse import quote, urlencode
 
 import httpx
 from playwright.async_api import BrowserContext, Page
-from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_not_exception_type
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    retry_if_not_exception_type,
+    stop_after_attempt,
+    wait_fixed,
+)
 from tools.httpx_util import make_async_client
 
 import config
@@ -112,7 +118,12 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
         self.headers.update(headers)
         return self.headers
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(1), retry=retry_if_not_exception_type((NoteNotFoundError, CaptchaError)))
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_fixed(1),
+        retry=retry_if_not_exception_type((NoteNotFoundError, CaptchaError)),
+        reraise=True,
+    )
     async def request(self, method, url, **kwargs) -> Union[str, Any]:
         """
         Wrapper for httpx common request method, processes request response
@@ -132,12 +143,28 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
         async with make_async_client(proxy=self.proxy) as client:
             response = await client.request(method, url, timeout=self.timeout, **kwargs)
 
-        if response.status_code == 471 or response.status_code == 461:
-            verify_type = response.headers.get("Verifytype", "")
-            verify_uuid = response.headers.get("Verifyuuid", "")
-            msg = f"CAPTCHA appeared, request failed, Verifytype: {verify_type}, Verifyuuid: {verify_uuid}, Response: {response}"
+        if response.status_code in (461, 471):
+            response_text = response.text
+            verify_data = self._extract_captcha_data(response)
+            verify_type = verify_data.get("verify_type", "")
+            verify_uuid = verify_data.get("verify_uuid", "")
+            verify_biz = verify_data.get("verify_biz", "") or str(response.status_code)
+            body_preview = response_text[:500].replace("\r", " ").replace("\n", " ")
+            msg = (
+                f"CAPTCHA appeared, request failed, Verifytype: {verify_type}, "
+                f"Verifyuuid: {verify_uuid}, Verifybiz: {verify_biz}, "
+                f"Response: {response}, Body: {body_preview}"
+            )
             utils.logger.error(msg)
-            raise CaptchaError(msg)
+            raise CaptchaError(
+                msg,
+                request=response.request,
+                verify_type=verify_type,
+                verify_uuid=verify_uuid,
+                verify_biz=verify_biz,
+                status_code=response.status_code,
+                response_text=response_text,
+            )
 
         if return_response:
             return response.text
@@ -151,6 +178,42 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
         else:
             err_msg = data.get("msg", None) or f"{response.text}"
             raise DataFetchError(err_msg)
+
+    @staticmethod
+    def _extract_captcha_data(response: httpx.Response) -> Dict[str, str]:
+        """Extract CAPTCHA metadata from response headers or a nested JSON body."""
+        aliases = {
+            "verifytype": "verify_type",
+            "verify_type": "verify_type",
+            "verifyuuid": "verify_uuid",
+            "verify_uuid": "verify_uuid",
+            "verifybiz": "verify_biz",
+            "verify_biz": "verify_biz",
+        }
+        result = {
+            "verify_type": response.headers.get("Verifytype", ""),
+            "verify_uuid": response.headers.get("Verifyuuid", ""),
+            "verify_biz": response.headers.get("Verifybiz", ""),
+        }
+
+        try:
+            payload = response.json()
+        except (json.JSONDecodeError, ValueError):
+            return result
+
+        def visit(value: Any) -> None:
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    target = aliases.get(str(key).lower())
+                    if target and not result[target] and item is not None:
+                        result[target] = str(item)
+                    visit(item)
+            elif isinstance(value, list):
+                for item in value:
+                    visit(item)
+
+        visit(payload)
+        return result
 
     @staticmethod
     def _build_query_string(params: Dict) -> str:
@@ -207,25 +270,39 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
         # Check if proxy is expired before request
         await self._refresh_proxy_if_expired()
 
-        async with make_async_client(proxy=self.proxy) as client:
-            try:
-                response = await client.request("GET", url, timeout=self.timeout)
-                response.raise_for_status()
-                if not response.reason_phrase == "OK":
-                    utils.logger.error(
-                        f"[XiaoHongShuClient.get_note_media] request {url} err, res:{response.text}"
-                    )
-                    return None
-                else:
+        try:
+            for attempt in range(1, 4):
+                try:
+                    async with make_async_client(proxy=self.proxy) as client:
+                        response = await client.request("GET", url, timeout=self.timeout)
+                    response.raise_for_status()
+                    if not response.reason_phrase == "OK":
+                        utils.logger.error(
+                            f"[XiaoHongShuClient.get_note_media] request {url} err, res:{response.text}"
+                        )
+                        return None
                     return response.content
-            except (
-                httpx.HTTPError
-            ) as exc:  # some wrong when call httpx.request method, such as connection error, client error, server error or response status code is not 2xx
-                utils.logger.error(
-                    f"[XiaoHongShuClient.get_aweme_media] {exc.__class__.__name__} for {exc.request.url} - {exc}"
-                )  # Keep original exception type name for developer debugging
-                return None
+                except httpx.RequestError as exc:
+                    if attempt >= 3:
+                        raise
+                    utils.logger.warning(
+                        f"[XiaoHongShuClient.get_note_media] Request failed "
+                        f"({type(exc).__name__}), retrying in {attempt} seconds "
+                        f"({attempt}/3): {url}"
+                    )
+                    await asyncio.sleep(attempt)
+        except httpx.HTTPError as exc:  # some wrong when call httpx.request method, such as connection error, client error, server error or response status code is not 2xx
+            utils.logger.error(
+                f"[XiaoHongShuClient.get_note_media] {exc.__class__.__name__} for {exc.request.url} - {exc}"
+            )  # Keep original exception type name for developer debugging
+            return None
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_fixed(1),
+        retry=retry_if_exception_type(httpx.RequestError),
+        reraise=True,
+    )
     async def query_self(self) -> Optional[Dict]:
         """
         Query self user info to check login state
@@ -667,7 +744,6 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
         data = {"original_url": f"{self._domain}/discovery/item/{note_id}"}
         return await self.post(uri, data=data, return_response=True)
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(1))
     async def get_note_by_id_from_html(
         self,
         note_id: str,

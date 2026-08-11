@@ -22,7 +22,9 @@ import os
 import random
 from asyncio import Task
 from typing import Dict, List, Optional
+from urllib.parse import urlencode
 
+import httpx
 from playwright.async_api import (
     BrowserContext,
     BrowserType,
@@ -30,8 +32,6 @@ from playwright.async_api import (
     Playwright,
     async_playwright,
 )
-from tenacity import RetryError
-
 import config
 from base.base_crawler import AbstractCrawler
 from database.db_session import get_session
@@ -45,9 +45,13 @@ from tools.cdp_browser import CDPBrowserManager
 from tools.creator_failure_cache import filter_failed_creator_ids, record_creator_failure
 from var import crawler_type_var, source_keyword_var
 
-from tools.crawl_dedup import filter_uncrawled_note_ids
+from tools.crawl_dedup import (
+    filter_note_ids_needing_comment_recovery,
+    filter_uncrawled_note_ids,
+)
+from tools.crawl_progress import emit_keyword_completed
 from .client import XiaoHongShuClient
-from .exception import CaptchaError, DataFetchError, NoteNotFoundError
+from .exception import CaptchaError, NoteNotFoundError
 from .field import SearchSortType
 from .help import parse_note_info_from_note_url, parse_creator_info_from_url, get_search_id
 from .login import XiaoHongShuLogin
@@ -62,8 +66,17 @@ class XiaoHongShuCrawler(AbstractCrawler):
     def __init__(self) -> None:
         self.index_url = "https://www.rednote.com" if config.XHS_INTERNATIONAL else "https://www.xiaohongshu.com"
         self.cookie_urls = [self.index_url]
-        # self.user_agent = utils.get_user_agent()
-        self.user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+        self.user_agent = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/136.0.0.0 Safari/537.36"
+        )
+        self.sec_ch_ua = (
+            '"Chromium";v="136", "Google Chrome";v="136", '
+            '"Not.A/Brand";v="99"'
+        )
+        self.sec_ch_ua_platform = '"Windows"'
+        self.sec_ch_ua_mobile = "?0"
         self.cdp_manager = None
         self.ip_proxy_pool = None  # Proxy IP pool for automatic proxy refresh
         self.success = 0
@@ -107,6 +120,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
 
             self.context_page = await self.browser_context.new_page()
             await self.context_page.goto(self.index_url)
+            await self._sync_api_fingerprint_from_browser()
 
             # Create a client to interact with the Xiaohongshu website.
             self.xhs_client = await self.create_xhs_client(httpx_proxy_format)
@@ -125,17 +139,20 @@ class XiaoHongShuCrawler(AbstractCrawler):
                 )
 
             crawler_type_var.set(config.CRAWLER_TYPE)
-            if config.CRAWLER_TYPE == "search":
-                # Search for notes and retrieve their comment information.
-                await self.search()
-            elif config.CRAWLER_TYPE == "detail":
-                # Get the information and comments of the specified post
-                await self.get_specified_notes()
-            elif config.CRAWLER_TYPE == "creator":
-                # Get creator's information and their notes and comments
-                await self.get_creators_and_notes()
-            else:
-                pass
+            while True:
+                try:
+                    if config.CRAWLER_TYPE == "search":
+                        # Search for notes and retrieve their comment information.
+                        await self.search()
+                    elif config.CRAWLER_TYPE == "detail":
+                        # Get the information and comments of the specified post
+                        await self.get_specified_notes()
+                    elif config.CRAWLER_TYPE == "creator":
+                        # Get creator's information and their notes and comments
+                        await self.get_creators_and_notes()
+                    break
+                except CaptchaError as ex:
+                    await self._wait_for_captcha(ex)
 
             utils.logger.info(f"[XiaoHongShuCrawler.start] Xhs Crawler finished ... all count:{config.CRAWLER_MAX_NOTES_COUNT},success:{self.success},mismatch:{self.mismatch}")
 
@@ -151,6 +168,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
             utils.logger.info(f"[XiaoHongShuCrawler.search] Current search keyword: {keyword}")
             page = 1
             search_id = get_search_id()
+            keyword_completed = True
             while (page - start_page + 1) * xhs_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
                 if page < start_page:
                     utils.logger.info(f"[XiaoHongShuCrawler.search] Skip page {page}")
@@ -179,12 +197,30 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     ]
                     candidate_ids = [item.get("id") for item in candidate_items if item.get("id")]
                     uncrawled_ids = set(await filter_uncrawled_note_ids("xhs", candidate_ids))
+                    recovery_note_ids = set(
+                        await filter_note_ids_needing_comment_recovery(
+                            "xhs", candidate_ids
+                        )
+                    )
+                    recovery_items = [
+                        item for item in candidate_items
+                        if item.get("id") in recovery_note_ids
+                    ]
                     filtered_items = [item for item in candidate_items if item.get("id") in uncrawled_ids]
 
                     if not filtered_items:
-                        utils.logger.info("[XiaoHongShuCrawler.search] All notes on this page already crawled, skipping")
+                        if recovery_items:
+                            await self.batch_get_note_comments(
+                                [item.get("id") for item in recovery_items],
+                                [item.get("xsec_token") for item in recovery_items],
+                            )
+                        else:
+                            utils.logger.info("[XiaoHongShuCrawler.search] All notes on this page already crawled, skipping")
                         page += 1
                         continue
+                    comment_note_ids = {item.get("id") for item in filtered_items}
+                    note_ids = [item.get("id") for item in recovery_items]
+                    xsec_tokens = [item.get("xsec_token") for item in recovery_items]
 
                     semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
                     task_list = [
@@ -197,12 +233,19 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     ]
                     note_details = await asyncio.gather(*task_list)
                     for note_detail in note_details:
-                        if note_detail and (keyword in note_detail.get("title","") or keyword in note_detail.get("desc","")):
+                        if not note_detail:
+                            utils.logger.warning(
+                                "[XiaoHongShuCrawler.search] Skip empty note detail after fetch failure"
+                            )
+                            continue
+
+                        if keyword in note_detail.get("title", "") or keyword in note_detail.get("desc", ""):
                             self.success += 1
                             await xhs_store.update_xhs_note(note_detail)
                             await self.get_notice_media(note_detail)
-                            note_ids.append(note_detail.get("note_id"))
-                            xsec_tokens.append(note_detail.get("xsec_token"))
+                            if str(note_detail.get("note_id")) in comment_note_ids:
+                                note_ids.append(note_detail.get("note_id"))
+                                xsec_tokens.append(note_detail.get("xsec_token"))
                         else:
                             self.mismatch += 1
                             utils.logger.info(f"[XiaoHongShuCrawler.search] Success Count:{self.success}, Mismatch Count:{self.mismatch} Title And Content No Keyword! https://www.xiaohongshu.com/explore/{note_detail.get('note_id')}?xsec_token={note_detail.get('xsec_token')}&xsec_source=pc_search")
@@ -211,17 +254,31 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     await self.batch_get_note_comments(note_ids, xsec_tokens)
 
                     # Sleep after each page navigation
-                    await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
-                    utils.logger.info(f"[XiaoHongShuCrawler.search] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after page {page-1}")
-                except CaptchaError:
-                    await self._wait_for_captcha()
+                    await asyncio.sleep(config.XHS_CRAWLER_SLEEP_SEC)
+                    utils.logger.info(f"[XiaoHongShuCrawler.search] Sleeping for {config.XHS_CRAWLER_SLEEP_SEC} seconds after page {page-1}")
+                except CaptchaError as ex:
+                    if not ex.redirect_url:
+                        query = urlencode(
+                            {
+                                "keyword": keyword,
+                                "source": "web_search_result_notes",
+                            }
+                        )
+                        ex.redirect_url = f"{self.index_url}/search_result?{query}"
+                    await self._wait_for_captcha(ex)
                     continue
-                except DataFetchError as e:
+                except httpx.RequestError as e:
                     if any(kw in str(e) for kw in ("登录已过期", "未登录", "请先登录", "login")):
                         await self._wait_for_relogin()
                         continue
-                    utils.logger.error(f"[XiaoHongShuCrawler.search] Get note detail error: {e}")
+                    keyword_completed = False
+                    utils.logger.error(
+                        f"[XiaoHongShuCrawler.search] Keyword {keyword}, page {page} "
+                        f"failed after retries, skipping page: {e}"
+                    )
                     break
+            if keyword_completed:
+                emit_keyword_completed(config.PLATFORM, keyword)
 
     async def _wait_for_relogin(self, timeout_seconds: int = 3600) -> None:
         """登录过期时暂停，每 30 秒检测一次浏览器登录状态，恢复后自动继续。
@@ -252,39 +309,162 @@ class XiaoHongShuCrawler(AbstractCrawler):
         utils.logger.error("[XiaoHongShuCrawler] 等待登录超时（1小时），自动退出程序")
         raise SystemExit(1)
 
-    async def _wait_for_captcha(self, timeout_seconds: int = 3600) -> None:
-        """验证码出现时暂停，每 30 秒尝试一次请求检测验证是否通过。
-        超过 timeout_seconds 仍未通过则退出程序。
-        """
-        utils.logger.warning(
-            "[XiaoHongShuCrawler] 触发验证码，请在浏览器中完成验证，"
-            "程序将每隔 30 秒自动检测，超过 1 小时未通过将自动退出..."
+    async def _wait_for_captcha(
+        self,
+        captcha_error: CaptchaError,
+        timeout_seconds: int = 3600,
+        cooldown_seconds: int = 300,
+    ) -> None:
+        """Open an actionable verification page, or cool down when none is available."""
+        target_url = captcha_error.redirect_url or self.index_url
+        has_verify_params = bool(captcha_error.verify_type and captcha_error.verify_uuid)
+        if not has_verify_params:
+            utils.logger.warning(
+                "[XiaoHongShuCrawler] 收到 461/471 风控响应，但服务端未返回网页验证参数，"
+                f"当前没有可操作的验证码。浏览器保持当前页面，暂停 {cooldown_seconds} 秒后重试..."
+            )
+            await asyncio.sleep(cooldown_seconds)
+            try:
+                await self.xhs_client.update_cookies(
+                    browser_context=self.browser_context,
+                    urls=self.cookie_urls,
+                )
+            except Exception as ex:
+                utils.logger.warning(f"[XiaoHongShuCrawler] 风控冷却后更新 Cookie 失败: {ex}")
+            utils.logger.info(
+                f"[XiaoHongShuCrawler] 风控冷却 {cooldown_seconds} 秒结束，重新尝试当前任务..."
+            )
+            return
+
+        captcha_query = urlencode(
+            {
+                "redirectPath": target_url,
+                "verifyUuid": captcha_error.verify_uuid,
+                "verifyType": captcha_error.verify_type,
+                "verifyBiz": (
+                    captcha_error.verify_biz
+                    or captcha_error.status_code
+                    or 461
+                ),
+            }
         )
+        open_url = f"{self.index_url}/website-login/captcha?{captcha_query}"
+        utils.logger.warning(
+            "[XiaoHongShuCrawler] 触发网页安全验证，已在浏览器中打开验证页。"
+            "程序将每隔 30 秒检测一次，超过 1 小时未完成将自动退出..."
+        )
+
+        page_opened = True
+        try:
+            await self.context_page.bring_to_front()
+            await self.context_page.goto(
+                open_url,
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+        except Exception as ex:
+            page_opened = False
+            utils.logger.warning(f"[XiaoHongShuCrawler] 打开风控相关页面失败: {ex}")
+
+        if not page_opened:
+            await asyncio.sleep(cooldown_seconds)
+            utils.logger.warning(
+                f"[XiaoHongShuCrawler] 验证页未能打开，已冷却 {cooldown_seconds} 秒，稍后重试..."
+            )
+            return
+
+        if not await self._page_has_visible_captcha():
+            await self.xhs_client.update_cookies(
+                browser_context=self.browser_context,
+                urls=self.cookie_urls,
+            )
+            utils.logger.info("[XiaoHongShuCrawler] 网页验证已关闭，继续抓取...")
+            return
+
         elapsed = 0
         interval = 30
         while elapsed < timeout_seconds:
             await asyncio.sleep(interval)
             elapsed += interval
             try:
-                # 尝试刷新 cookies 并发起一个轻量请求来检测验证是否已通过
+                if await self._page_has_visible_captcha():
+                    utils.logger.info(
+                        f"[XiaoHongShuCrawler] 网页验证仍未完成，已等待 {elapsed}s / {timeout_seconds}s..."
+                    )
+                    continue
                 await self.xhs_client.update_cookies(
                     browser_context=self.browser_context,
                     urls=self.cookie_urls,
                 )
-                if await self.xhs_client.pong():
-                    utils.logger.info("[XiaoHongShuCrawler] 验证码已通过，继续抓取...")
-                    return
-                utils.logger.info(
-                    f"[XiaoHongShuCrawler] 验证码仍未通过，已等待 {elapsed}s / {timeout_seconds}s..."
-                )
-            except CaptchaError:
-                utils.logger.info(
-                    f"[XiaoHongShuCrawler] 验证码仍未通过，已等待 {elapsed}s / {timeout_seconds}s..."
-                )
+                utils.logger.info("[XiaoHongShuCrawler] 网页验证已关闭，继续抓取...")
+                return
             except Exception as ex:
                 utils.logger.warning(f"[XiaoHongShuCrawler] 检测验证码状态时出错: {ex}，继续等待...")
         utils.logger.error("[XiaoHongShuCrawler] 等待验证码超时（1小时），自动退出程序")
         raise SystemExit(1)
+
+    async def _page_has_visible_captcha(self) -> bool:
+        """Return whether the current browser page still shows a security challenge."""
+        current_url = (self.context_page.url or "").lower()
+        try:
+            body_text = await self.context_page.locator("body").inner_text(timeout=5000)
+        except Exception:
+            body_text = ""
+
+        if any(marker in body_text for marker in ("验证成功", "验证已通过", "已完成验证")):
+            return False
+
+        if any(
+            marker in body_text
+            for marker in ("请通过验证", "完成验证", "安全验证", "拖动滑块", "验证码")
+        ):
+            return True
+
+        return any(
+            marker in current_url
+            for marker in ("/captcha", "/security/verify")
+        )
+
+    async def _sync_api_fingerprint_from_browser(self) -> None:
+        """Use the browser's actual client hints for matching API request headers."""
+        try:
+            fingerprint = await self.context_page.evaluate(
+                """() => ({
+                    userAgent: navigator.userAgent,
+                    userAgentData: navigator.userAgentData ? {
+                        brands: navigator.userAgentData.brands,
+                        mobile: navigator.userAgentData.mobile,
+                        platform: navigator.userAgentData.platform
+                    } : null
+                })"""
+            )
+            user_agent = fingerprint.get("userAgent", "")
+            user_agent_data = fingerprint.get("userAgentData") or {}
+            brands = user_agent_data.get("brands") or []
+            platform = user_agent_data.get("platform", "")
+
+            if user_agent:
+                self.user_agent = user_agent
+            if brands:
+                self.sec_ch_ua = ", ".join(
+                    f'"{brand["brand"]}";v="{brand["version"]}"'
+                    for brand in brands
+                    if brand.get("brand") and brand.get("version")
+                )
+            if platform:
+                self.sec_ch_ua_platform = f'"{platform}"'
+            if "mobile" in user_agent_data:
+                self.sec_ch_ua_mobile = "?1" if user_agent_data["mobile"] else "?0"
+
+            utils.logger.info(
+                "[XiaoHongShuCrawler] API fingerprint synchronized with browser: "
+                f"{self.user_agent}, {self.sec_ch_ua_platform}"
+            )
+        except Exception as ex:
+            utils.logger.warning(
+                "[XiaoHongShuCrawler] Could not read browser fingerprint; "
+                f"using configured fallback values: {ex}"
+            )
 
     async def _get_uncrawled_creator_ids(self) -> List[str]:
         """从 xhs_note 查 user_id，减去 xhs_creator 已有的，返回差集"""
@@ -301,13 +481,20 @@ class XiaoHongShuCrawler(AbstractCrawler):
         creator_id_list = await self._get_uncrawled_creator_ids()
 
         for user_id in creator_id_list:
-            await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC * 2)
-            try:
-                createor_info: Dict = await self.xhs_client.get_creator_info(user_id=user_id)
-            except DataFetchError as ex:
-                record_creator_failure("xhs", user_id)
-                utils.logger.warning(f"[XiaoHongShuCrawler] 记录失败博主并跳过: {user_id}, {ex}")
-                continue
+            while True:
+                await asyncio.sleep(config.XHS_CRAWLER_SLEEP_SEC * 2)
+                try:
+                    createor_info: Dict = await self.xhs_client.get_creator_info(user_id=user_id)
+                    break
+                except CaptchaError as ex:
+                    if not ex.redirect_url:
+                        ex.redirect_url = f"{self.index_url}/user/profile/{user_id}"
+                    await self._wait_for_captcha(ex)
+                except httpx.RequestError as ex:
+                    record_creator_failure("xhs", user_id)
+                    utils.logger.warning(f"[XiaoHongShuCrawler] 记录失败博主并跳过: {user_id}, {ex}")
+                    createor_info = None
+                    break
             if createor_info:
                 await xhs_store.save_creator(user_id, creator=createor_info)
             else:
@@ -317,7 +504,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
 
             # region 这里是抓取创作者的笔记，目前不需要，先隐藏
             # # Use fixed crawling interval
-            # crawl_interval = config.CRAWLER_MAX_SLEEP_SEC
+            # crawl_interval = config.XHS_CRAWLER_SLEEP_SEC
             # # Get all note information of the creator
             # all_notes_list = await self.xhs_client.get_all_notes_by_creator(
             #     user_id=user_id,
@@ -405,34 +592,65 @@ class XiaoHongShuCrawler(AbstractCrawler):
             try:
                 try:
                     note_detail = await self.xhs_client.get_note_by_id(note_id, xsec_source, xsec_token)
-                except RetryError as e:
-                    # CaptchaError 被 tenacity 包装在 RetryError 中，需要解包后向上抛出
-                    if isinstance(e.last_attempt.exception(), CaptchaError):
-                        raise e.last_attempt.exception()
-                    pass
+                except CaptchaError as ex:
+                    if not ex.redirect_url:
+                        ex.redirect_url = self._build_note_url(
+                            note_id,
+                            xsec_token,
+                            xsec_source,
+                        )
+                    raise
+                except NoteNotFoundError:
+                    raise
+                except httpx.RequestError as ex:
+                    utils.logger.warning(
+                        f"[XiaoHongShuCrawler.get_note_detail_async_task] API detail for "
+                        f"{note_id} failed after retries, trying HTML fallback: {ex}"
+                    )
 
                 if not note_detail:
                     note_detail = await self.xhs_client.get_note_by_id_from_html(note_id, xsec_source, xsec_token,
                                                                                  enable_cookie=True)
                     if not note_detail:
-                        raise Exception(f"[get_note_detail_async_task] Failed to get note detail, Id: {note_id}")
+                        utils.logger.error(
+                            f"[XiaoHongShuCrawler.get_note_detail_async_task] Note "
+                            f"{note_id} detail is empty after API and HTML attempts, skipping"
+                        )
+                        return None
 
                 note_detail.update({"xsec_token": xsec_token, "xsec_source": xsec_source})
 
                 # Sleep after fetching note detail
-                await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
-                utils.logger.info(f"[get_note_detail_async_task] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after fetching note {note_id}")
+                await asyncio.sleep(config.XHS_CRAWLER_SLEEP_SEC)
+                utils.logger.info(f"[get_note_detail_async_task] Sleeping for {config.XHS_CRAWLER_SLEEP_SEC} seconds after fetching note {note_id}")
 
                 return note_detail
 
+            except CaptchaError as ex:
+                if not ex.redirect_url:
+                    ex.redirect_url = self._build_note_url(
+                        note_id,
+                        xsec_token,
+                        xsec_source,
+                    )
+                raise
             except NoteNotFoundError as ex:
                 utils.logger.warning(f"[XiaoHongShuCrawler.get_note_detail_async_task] Note not found: {note_id}, {ex}")
                 return None
-            except DataFetchError as ex:
-                utils.logger.error(f"[XiaoHongShuCrawler.get_note_detail_async_task] Get note detail error: {ex}")
+            except httpx.RequestError as ex:
+                utils.logger.error(
+                    f"[XiaoHongShuCrawler.get_note_detail_async_task] Note {note_id} detail "
+                    f"failed after retries, skipping: {ex}"
+                )
                 return None
             except KeyError as ex:
                 utils.logger.error(f"[XiaoHongShuCrawler.get_note_detail_async_task] have not fund note detail note_id:{note_id}, err: {ex}")
+                return None
+            except Exception as ex:
+                utils.logger.error(
+                    f"[XiaoHongShuCrawler.get_note_detail_async_task] Note {note_id} "
+                    f"detail failed, skipping: {ex}"
+                )
                 return None
 
     async def batch_get_note_comments(self, note_list: List[str], xsec_tokens: List[str]):
@@ -455,20 +673,48 @@ class XiaoHongShuCrawler(AbstractCrawler):
     async def get_comments(self, note_id: str, xsec_token: str, semaphore: asyncio.Semaphore):
         """Get note comments with keyword filtering and quantity limitation"""
         async with semaphore:
-            utils.logger.info(f"[XiaoHongShuCrawler.get_comments] Begin get note id comments {note_id}")
-            # Use fixed crawling interval
-            crawl_interval = config.CRAWLER_MAX_SLEEP_SEC
-            await self.xhs_client.get_note_all_comments(
-                note_id=note_id,
-                xsec_token=xsec_token,
-                crawl_interval=crawl_interval,
-                callback=xhs_store.batch_update_xhs_note_comments,
-                max_count=config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES,
-            )
+            try:
+                utils.logger.info(f"[XiaoHongShuCrawler.get_comments] Begin get note id comments {note_id}")
+                # Use fixed crawling interval
+                crawl_interval = config.XHS_CRAWLER_SLEEP_SEC
+                await self.xhs_client.get_note_all_comments(
+                    note_id=note_id,
+                    xsec_token=xsec_token,
+                    crawl_interval=crawl_interval,
+                    callback=xhs_store.batch_update_xhs_note_comments,
+                    max_count=config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES,
+                )
 
-            # Sleep after fetching comments
-            await asyncio.sleep(crawl_interval)
-            utils.logger.info(f"[XiaoHongShuCrawler.get_comments] Sleeping for {crawl_interval} seconds after fetching comments for note {note_id}")
+                # Sleep after fetching comments
+                await asyncio.sleep(crawl_interval)
+                utils.logger.info(f"[XiaoHongShuCrawler.get_comments] Sleeping for {crawl_interval} seconds after fetching comments for note {note_id}")
+            except CaptchaError as ex:
+                if not ex.redirect_url:
+                    ex.redirect_url = self._build_note_url(
+                        note_id,
+                        xsec_token,
+                        "pc_search",
+                    )
+                raise
+            except httpx.RequestError as ex:
+                utils.logger.error(
+                    f"[XiaoHongShuCrawler.get_comments] Note {note_id} comments failed "
+                    f"after retries, skipping: {ex}"
+                )
+            except Exception as ex:
+                utils.logger.error(
+                    f"[XiaoHongShuCrawler.get_comments] Note {note_id} comments "
+                    f"failed, skipping: {ex}"
+                )
+
+    def _build_note_url(self, note_id: str, xsec_token: str, xsec_source: str) -> str:
+        query = urlencode(
+            {
+                "xsec_token": xsec_token or "",
+                "xsec_source": xsec_source or "pc_search",
+            }
+        )
+        return f"{self.index_url}/explore/{note_id}?{query}"
 
     async def create_xhs_client(self, httpx_proxy: Optional[str]) -> XiaoHongShuClient:
         """Create Xiaohongshu client"""
@@ -488,13 +734,13 @@ class XiaoHongShuCrawler(AbstractCrawler):
                 "pragma": "no-cache",
                 "priority": "u=1, i",
                 "referer": f"{self.index_url}/",
-                "sec-ch-ua": '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"Windows"',
+                "sec-ch-ua": self.sec_ch_ua,
+                "sec-ch-ua-mobile": self.sec_ch_ua_mobile,
+                "sec-ch-ua-platform": self.sec_ch_ua_platform,
                 "sec-fetch-dest": "empty",
                 "sec-fetch-mode": "cors",
                 "sec-fetch-site": "same-site",
-                "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+                "user-agent": self.user_agent,
                 "Cookie": cookie_str,
             },
             playwright_page=self.context_page,
@@ -525,12 +771,13 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     "width": 1920,
                     "height": 1080
                 },
-                user_agent=user_agent,
             )
             return browser_context
         else:
             browser = await chromium.launch(headless=headless, proxy=playwright_proxy)  # type: ignore
-            browser_context = await browser.new_context(viewport={"width": 1920, "height": 1080}, user_agent=user_agent)
+            browser_context = await browser.new_context(
+                viewport={"width": 1920, "height": 1080}
+            )
             return browser_context
 
     async def launch_browser_with_cdp(

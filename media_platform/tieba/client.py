@@ -25,7 +25,7 @@ from urllib.parse import urlencode, quote, parse_qs, unquote, urlparse
 
 import requests
 from playwright.async_api import BrowserContext, Page
-from tenacity import RetryError, retry, stop_after_attempt, wait_fixed
+from tenacity import retry, stop_after_attempt, wait_fixed
 
 import config
 from base.base_crawler import AbstractApiClient
@@ -79,6 +79,7 @@ class BaiduTieBaClient(AbstractApiClient):
         if not self.playwright_page.url.startswith(self._host):
             await self.playwright_page.goto(self._host, wait_until="domcontentloaded")
 
+    @retry(stop=stop_after_attempt(3), wait=wait_fixed(1), reraise=True)
     async def _fetch_json_by_browser(
         self,
         uri: str,
@@ -233,7 +234,7 @@ class BaiduTieBaClient(AbstractApiClient):
                 f"[BaiduTieBaClient._refresh_proxy_if_expired] New proxy: {new_proxy.ip}:{new_proxy.port}"
             )
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(1))
+    @retry(stop=stop_after_attempt(3), wait=wait_fixed(1), reraise=True)
     async def request(self, method, url, return_ori_content=False, proxy=None, **kwargs) -> Union[str, Any]:
         """
         Common request method wrapper for requests, handles request responses
@@ -290,19 +291,12 @@ class BaiduTieBaClient(AbstractApiClient):
         if isinstance(params, dict):
             final_uri = (f"{uri}?"
                          f"{urlencode(params)}")
-        try:
-            res = await self.request(method="GET", url=f"{self._host}{final_uri}", return_ori_content=return_ori_content, **kwargs)
-            return res
-        except RetryError as e:
-            if self.ip_pool:
-                proxie_model = await self.ip_pool.get_proxy()
-                _, proxy = utils.format_proxy_info(proxie_model)
-                res = await self.request(method="GET", url=f"{self._host}{final_uri}", return_ori_content=return_ori_content, proxy=proxy, **kwargs)
-                self.default_ip_proxy = proxy
-                return res
-
-            utils.logger.error(f"[BaiduTieBaClient.get] Reached maximum retry attempts, IP is blocked, please try a new IP proxy: {e}")
-            raise Exception(f"[BaiduTieBaClient.get] Reached maximum retry attempts, IP is blocked, please try a new IP proxy: {e}")
+        return await self.request(
+            method="GET",
+            url=f"{self._host}{final_uri}",
+            return_ori_content=return_ori_content,
+            **kwargs,
+        )
 
     async def post(self, uri: str, data: dict, **kwargs) -> Dict:
         """
@@ -448,6 +442,16 @@ class BaiduTieBaClient(AbstractApiClient):
         except Exception as e:
             utils.logger.error(f"[BaiduTieBaClient.get_note_by_id] Failed to get post details: {e}")
             raise
+
+    async def _get_note_by_id_or_none(self, note_id: str) -> Optional[TiebaNote]:
+        try:
+            return await self.get_note_by_id(note_id)
+        except Exception as ex:
+            utils.logger.error(
+                f"[BaiduTieBaClient._get_note_by_id_or_none] Note {note_id} failed "
+                f"after retries, skipping: {ex}"
+            )
+            return None
 
     async def get_note_all_comments(
         self,
@@ -778,9 +782,10 @@ class BaiduTieBaClient(AbstractApiClient):
         if creator_page_html_content:
             thread_id_list = (self._page_extractor.extract_tieba_thread_id_list_from_creator_page(creator_page_html_content))
             utils.logger.info(f"[BaiduTieBaClient.get_all_notes_by_creator] got user_name:{user_name} thread_id_list len : {len(thread_id_list)}")
-            note_detail_task = [self.get_note_by_id(thread_id) for thread_id in thread_id_list]
+            note_detail_task = [self._get_note_by_id_or_none(thread_id) for thread_id in thread_id_list]
             notes = await asyncio.gather(*note_detail_task)
-            if callback:
+            notes = [note for note in notes if note]
+            if callback and notes:
                 await callback(notes)
             result.extend(notes)
 
@@ -798,9 +803,10 @@ class BaiduTieBaClient(AbstractApiClient):
             notes = notes_data["thread_list"]
             utils.logger.info(f"[TieBaClient.get_all_notes_by_creator] got user_name:{user_name} notes len : {len(notes)}")
 
-            note_detail_task = [self.get_note_by_id(note['thread_id']) for note in notes]
+            note_detail_task = [self._get_note_by_id_or_none(note['thread_id']) for note in notes]
             notes = await asyncio.gather(*note_detail_task)
-            if callback:
+            notes = [note for note in notes if note]
+            if callback and notes:
                 await callback(notes)
             await asyncio.sleep(crawl_interval)
             result.extend(notes)
@@ -847,7 +853,7 @@ class BaiduTieBaClient(AbstractApiClient):
                 f"[BaiduTieBaClient.get_all_notes_by_creator_url] "
                 f"got portrait:{portrait} thread ids len: {len(thread_id_list)}"
             )
-            note_detail_task = [self.get_note_by_id(thread_id) for thread_id in thread_id_list]
+            note_detail_task = [self._get_note_by_id_or_none(thread_id) for thread_id in thread_id_list]
             notes = await asyncio.gather(*note_detail_task)
             notes = [note for note in notes if note]
             if callback and notes:

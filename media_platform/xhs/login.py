@@ -158,7 +158,7 @@ class XiaoHongShuLogin(AbstractLogin):
             await self.check_login_state(no_logged_in_session)
         except RetryError:
             utils.logger.info("[XiaoHongShuLogin.login_by_mobile] Login xiaohongshu failed by mobile login method ...")
-            sys.exit()
+            sys.exit(1)
 
         wait_redirect_seconds = 5
         utils.logger.info(f"[XiaoHongShuLogin.login_by_mobile] Login successful then wait for {wait_redirect_seconds} seconds redirect ...")
@@ -185,7 +185,7 @@ class XiaoHongShuLogin(AbstractLogin):
                 selector=qrcode_img_selector
             )
             if not base64_qrcode_img:
-                sys.exit()
+                sys.exit(1)
 
         # get not logged session
         current_cookie = await self.browser_context.cookies()
@@ -204,7 +204,7 @@ class XiaoHongShuLogin(AbstractLogin):
             await self.check_login_state(no_logged_in_session)
         except RetryError:
             utils.logger.info("[XiaoHongShuLogin.login_by_qrcode] Login xiaohongshu failed by qrcode login method ...")
-            sys.exit()
+            sys.exit(1)
 
         wait_redirect_seconds = 5
         utils.logger.info(f"[XiaoHongShuLogin.login_by_qrcode] Login successful then wait for {wait_redirect_seconds} seconds redirect ...")

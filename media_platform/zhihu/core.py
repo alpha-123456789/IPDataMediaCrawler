@@ -25,6 +25,7 @@ import os
 from asyncio import Task
 from typing import Dict, List, Optional, Tuple, cast
 
+import httpx
 from playwright.async_api import (
     BrowserContext,
     BrowserType,
@@ -44,7 +45,6 @@ from tools.cdp_browser import CDPBrowserManager
 from var import crawler_type_var, source_keyword_var
 
 from .client import ZhiHuClient
-from .exception import DataFetchError
 from .help import ZhihuExtractor, judge_zhihu_url
 from .login import ZhiHuLogin
 
@@ -194,9 +194,12 @@ class ZhihuCrawler(AbstractCrawler):
                         await zhihu_store.update_zhihu_content(content)
 
                     await self.batch_get_content_comments(content_list)
-                except DataFetchError:
-                    utils.logger.error("[ZhihuCrawler.search] Search content error")
-                    return
+                except httpx.RequestError as ex:
+                    utils.logger.error(
+                        f"[ZhihuCrawler.search] Keyword {keyword}, page {page} "
+                        f"failed after retries, skipping page: {ex}"
+                    )
+                    break
 
     async def batch_get_content_comments(self, content_list: List[ZhihuContent]):
         """
@@ -235,19 +238,30 @@ class ZhihuCrawler(AbstractCrawler):
 
         """
         async with semaphore:
-            utils.logger.info(
-                f"[ZhihuCrawler.get_comments] Begin get note id comments {content_item.content_id}"
-            )
+            try:
+                utils.logger.info(
+                    f"[ZhihuCrawler.get_comments] Begin get note id comments {content_item.content_id}"
+                )
 
-            # Sleep before fetching comments
-            await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
-            utils.logger.info(f"[ZhihuCrawler.get_comments] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds before fetching comments for content {content_item.content_id}")
+                # Sleep before fetching comments
+                await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
+                utils.logger.info(f"[ZhihuCrawler.get_comments] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds before fetching comments for content {content_item.content_id}")
 
-            await self.zhihu_client.get_note_all_comments(
-                content=content_item,
-                crawl_interval=config.CRAWLER_MAX_SLEEP_SEC,
-                callback=zhihu_store.batch_update_zhihu_note_comments,
-            )
+                await self.zhihu_client.get_note_all_comments(
+                    content=content_item,
+                    crawl_interval=config.CRAWLER_MAX_SLEEP_SEC,
+                    callback=zhihu_store.batch_update_zhihu_note_comments,
+                )
+            except httpx.RequestError as ex:
+                utils.logger.error(
+                    f"[ZhihuCrawler.get_comments] Content {content_item.content_id} "
+                    f"comments failed after retries, skipping: {ex}"
+                )
+            except Exception as ex:
+                utils.logger.error(
+                    f"[ZhihuCrawler.get_comments] Content {content_item.content_id} "
+                    f"comments failed, skipping: {ex}"
+                )
 
     async def get_creators_and_notes(self) -> None:
         """
@@ -264,9 +278,16 @@ class ZhihuCrawler(AbstractCrawler):
             )
             user_url_token = user_link.split("/")[-1]
             # get creator detail info from web html content
-            createor_info: ZhihuCreator = await self.zhihu_client.get_creator_info(
-                url_token=user_url_token
-            )
+            try:
+                createor_info: ZhihuCreator = await self.zhihu_client.get_creator_info(
+                    url_token=user_url_token
+                )
+            except httpx.RequestError as ex:
+                utils.logger.error(
+                    f"[ZhihuCrawler.get_creators_and_notes] Creator {user_url_token} "
+                    f"failed after retries, skipping: {ex}"
+                )
+                continue
             if not createor_info:
                 utils.logger.info(
                     f"[ZhihuCrawler.get_creators_and_notes] Creator {user_url_token} not found"
@@ -281,11 +302,18 @@ class ZhihuCrawler(AbstractCrawler):
             # By default, only answer information is extracted, uncomment below if articles and videos are needed
 
             # Get all anwser information of the creator
-            all_content_list = await self.zhihu_client.get_all_anwser_by_creator(
-                creator=createor_info,
-                crawl_interval=config.CRAWLER_MAX_SLEEP_SEC,
-                callback=zhihu_store.batch_update_zhihu_contents,
-            )
+            try:
+                all_content_list = await self.zhihu_client.get_all_anwser_by_creator(
+                    creator=createor_info,
+                    crawl_interval=config.CRAWLER_MAX_SLEEP_SEC,
+                    callback=zhihu_store.batch_update_zhihu_contents,
+                )
+            except httpx.RequestError as ex:
+                utils.logger.error(
+                    f"[ZhihuCrawler.get_creators_and_notes] Creator {user_url_token} contents "
+                    f"failed after retries, skipping: {ex}"
+                )
+                continue
 
             # Get all articles of the creator's contents
             # all_content_list = await self.zhihu_client.get_all_articles_by_creator(
@@ -379,8 +407,18 @@ class ZhihuCrawler(AbstractCrawler):
             get_note_detail_task_list.append(crawler_task)
 
         need_get_comment_notes: List[ZhihuContent] = []
-        note_details = await asyncio.gather(*get_note_detail_task_list)
+        note_details = await asyncio.gather(
+            *get_note_detail_task_list,
+            return_exceptions=True,
+        )
         for index, note_detail in enumerate(note_details):
+            if isinstance(note_detail, Exception):
+                utils.logger.error(
+                    f"[ZhihuCrawler.get_specified_notes] Note "
+                    f"{config.ZHIHU_SPECIFIED_ID_LIST[index]} failed after retries, "
+                    f"skipping: {note_detail}"
+                )
+                continue
             if not note_detail:
                 utils.logger.info(
                     f"[ZhihuCrawler.get_specified_notes] Note {config.ZHIHU_SPECIFIED_ID_LIST[index]} not found"

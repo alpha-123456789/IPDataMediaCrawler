@@ -222,11 +222,18 @@ class TieBaCrawler(AbstractCrawler):
             )
             page_number = 0
             while page_number <= config.CRAWLER_MAX_NOTES_COUNT:
-                note_list: List[TiebaNote] = (
-                    await self.tieba_client.get_notes_by_tieba_name(
-                        tieba_name=tieba_name, page_num=page_number
+                try:
+                    note_list: List[TiebaNote] = (
+                        await self.tieba_client.get_notes_by_tieba_name(
+                            tieba_name=tieba_name, page_num=page_number
+                        )
                     )
-                )
+                except Exception as ex:
+                    utils.logger.error(
+                        f"[BaiduTieBaCrawler.get_specified_tieba_notes] Tieba {tieba_name} "
+                        f"page {page_number} failed after retries, skipping: {ex}"
+                    )
+                    break
                 if not note_list:
                     utils.logger.info(
                         f"[BaiduTieBaCrawler.get_specified_tieba_notes] Get note list is empty"
@@ -304,11 +311,6 @@ class TieBaCrawler(AbstractCrawler):
                     f"[BaiduTieBaCrawler.get_note_detail] Get note detail error: {ex}"
                 )
                 return None
-            except KeyError as ex:
-                utils.logger.error(
-                    f"[BaiduTieBaCrawler.get_note_detail] have not fund note detail note_id:{note_id}, err: {ex}"
-                )
-                return None
 
     async def batch_get_note_comments(self, note_detail_list: List[TiebaNote]):
         """
@@ -345,20 +347,26 @@ class TieBaCrawler(AbstractCrawler):
 
         """
         async with semaphore:
-            utils.logger.info(
-                f"[BaiduTieBaCrawler.get_comments] Begin get note id comments {note_detail.note_id}"
-            )
+            try:
+                utils.logger.info(
+                    f"[BaiduTieBaCrawler.get_comments] Begin get note id comments {note_detail.note_id}"
+                )
 
-            # Sleep before fetching comments
-            await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
-            utils.logger.info(f"[TieBaCrawler.get_comments_async_task] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds before fetching comments for note {note_detail.note_id}")
+                # Sleep before fetching comments
+                await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
+                utils.logger.info(f"[TieBaCrawler.get_comments_async_task] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds before fetching comments for note {note_detail.note_id}")
 
-            await self.tieba_client.get_note_all_comments(
-                note_detail=note_detail,
-                crawl_interval=config.CRAWLER_MAX_SLEEP_SEC,
-                callback=tieba_store.batch_update_tieba_note_comments,
-                max_count=config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES,
-            )
+                await self.tieba_client.get_note_all_comments(
+                    note_detail=note_detail,
+                    crawl_interval=config.CRAWLER_MAX_SLEEP_SEC,
+                    callback=tieba_store.batch_update_tieba_note_comments,
+                    max_count=config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES,
+                )
+            except Exception as ex:
+                utils.logger.error(
+                    f"[TieBaCrawler.get_comments_async_task] Note {note_detail.note_id} "
+                    f"comments failed after retries, skipping: {ex}"
+                )
 
     async def get_creators_and_notes(self) -> None:
         """
@@ -370,33 +378,36 @@ class TieBaCrawler(AbstractCrawler):
             "[TieBaCrawler.get_creators_and_notes] Begin get tieba creators"
         )
         for creator_url in config.TIEBA_CREATOR_URL_LIST:
-            creator_info: TiebaCreator = await self.tieba_client.get_creator_info_by_url(
-                creator_url=creator_url
-            )
-            if creator_info:
-                utils.logger.info(
-                    f"[TieBaCrawler.get_creators_and_notes] creator info: {creator_info}"
+            try:
+                creator_info: TiebaCreator = await self.tieba_client.get_creator_info_by_url(
+                    creator_url=creator_url
                 )
-                if not creator_info:
-                    raise Exception("Get creator info error")
-
-                await tieba_store.save_creator(user_info=creator_info)
-
-                # Get all note information of the creator
-                all_notes_list = (
-                    await self.tieba_client.get_all_notes_by_creator_url(
-                        creator_url=creator_url,
-                        crawl_interval=0,
-                        callback=tieba_store.batch_update_tieba_notes,
-                        max_note_count=config.CRAWLER_MAX_NOTES_COUNT,
+                if creator_info:
+                    utils.logger.info(
+                        f"[TieBaCrawler.get_creators_and_notes] creator info: {creator_info}"
                     )
-                )
+                    await tieba_store.save_creator(user_info=creator_info)
 
-                await self.batch_get_note_comments(all_notes_list)
+                    # Get all note information of the creator
+                    all_notes_list = (
+                        await self.tieba_client.get_all_notes_by_creator_url(
+                            creator_url=creator_url,
+                            crawl_interval=0,
+                            callback=tieba_store.batch_update_tieba_notes,
+                            max_note_count=config.CRAWLER_MAX_NOTES_COUNT,
+                        )
+                    )
 
-            else:
+                    await self.batch_get_note_comments(all_notes_list)
+
+                else:
+                    utils.logger.error(
+                        f"[TieBaCrawler.get_creators_and_notes] get creator info error, creator_url:{creator_url}"
+                    )
+            except Exception as ex:
                 utils.logger.error(
-                    f"[TieBaCrawler.get_creators_and_notes] get creator info error, creator_url:{creator_url}"
+                    f"[TieBaCrawler.get_creators_and_notes] Creator {creator_url} "
+                    f"failed after retries, skipping: {ex}"
                 )
 
     async def _navigate_to_tieba_via_baidu(self):

@@ -28,6 +28,7 @@ import os
 from asyncio import Task
 from typing import Dict, List, Optional, Tuple
 
+import httpx
 from playwright.async_api import (
     BrowserContext,
     BrowserType,
@@ -46,7 +47,11 @@ from store import weibo as weibo_store
 from tools import utils
 from tools.cdp_browser import CDPBrowserManager
 from tools.creator_failure_cache import filter_failed_creator_ids, get_failed_creator_ids, record_creator_failure
-from tools.crawl_dedup import filter_uncrawled_note_ids
+from tools.crawl_dedup import (
+    filter_note_ids_needing_comment_recovery,
+    filter_uncrawled_note_ids,
+)
+from tools.crawl_progress import emit_keyword_completed
 from var import crawler_type_var, source_keyword_var
 
 from .client import WeiboClient
@@ -174,6 +179,7 @@ class WeiboCrawler(AbstractCrawler):
             source_keyword_var.set(keyword)
             utils.logger.info(f"[WeiboCrawler.search] Current search keyword: {keyword}")
             page = 1
+            keyword_completed = True
             while (page - start_page + 1) * weibo_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
                 if page < start_page:
                     utils.logger.info(f"[WeiboCrawler.search] Skip page: {page}")
@@ -182,7 +188,8 @@ class WeiboCrawler(AbstractCrawler):
                 utils.logger.info(f"[WeiboCrawler.search] search weibo keyword: {keyword}, page: {page}")
                 try:
                     search_res = await self.wb_client.get_note_by_keyword(keyword=keyword, page=page, search_type=search_type)
-                except DataFetchError as e:
+                except httpx.RequestError as e:
+                    keyword_completed = False
                     utils.logger.info(f"[WeiboCrawler.search] 关键词 '{keyword}' 第 {page} 页无内容，停止翻页: {e}")
                     break
                 note_id_list: List[str] = []
@@ -194,10 +201,17 @@ class WeiboCrawler(AbstractCrawler):
                     for note_item in note_list if note_item and note_item.get("mblog")
                 ]
                 uncrawled_ids = set(await filter_uncrawled_note_ids("wb", candidate_ids))
+                recovery_note_ids = await filter_note_ids_needing_comment_recovery(
+                    "wb", candidate_ids
+                )
                 note_list = [
                     n for n in note_list
                     if n and n.get("mblog") and str(n.get("mblog", {}).get("id", "")) in uncrawled_ids
                 ]
+                comment_note_ids = {
+                    str(note_item.get("mblog", {}).get("id", ""))
+                    for note_item in note_list
+                }
 
                 # If full text fetching is enabled, batch get full text of posts
                 note_list = await self.batch_get_notes_full_text(note_list)
@@ -205,7 +219,8 @@ class WeiboCrawler(AbstractCrawler):
                     if note_item:
                         mblog: Dict = note_item.get("mblog")
                         if mblog  and keyword in mblog.get("text"):
-                            note_id_list.append(mblog.get("id"))
+                            if str(mblog.get("id")) in comment_note_ids:
+                                note_id_list.append(mblog.get("id"))
                             await weibo_store.update_weibo_note(note_item)
                             await self.get_note_images(mblog)
                         else:
@@ -218,7 +233,9 @@ class WeiboCrawler(AbstractCrawler):
                 await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
                 utils.logger.info(f"[WeiboCrawler.search] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after page {page-1}")
 
-                await self.batch_get_notes_comments(note_id_list)
+                await self.batch_get_notes_comments(recovery_note_ids + note_id_list)
+            if keyword_completed:
+                emit_keyword_completed(config.PLATFORM, keyword)
 
     async def get_specified_notes(self):
         """
@@ -249,11 +266,20 @@ class WeiboCrawler(AbstractCrawler):
                 utils.logger.info(f"[WeiboCrawler.get_note_info_task] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after fetching note details {note_id}")
 
                 return result
-            except DataFetchError as ex:
-                utils.logger.error(f"[WeiboCrawler.get_note_info_task] Get note detail error: {ex}")
+            except httpx.RequestError as ex:
+                utils.logger.error(
+                    f"[WeiboCrawler.get_note_info_task] Note {note_id} detail failed "
+                    f"after retries, skipping: {ex}"
+                )
                 return None
             except KeyError as ex:
                 utils.logger.error(f"[WeiboCrawler.get_note_info_task] have not fund note detail note_id:{note_id}, err: {ex}")
+                return None
+            except Exception as ex:
+                utils.logger.error(
+                    f"[WeiboCrawler.get_note_info_task] Note {note_id} detail "
+                    f"failed, skipping: {ex}"
+                )
                 return None
 
     async def batch_get_notes_comments(self, note_id_list: List[str]):
@@ -295,8 +321,11 @@ class WeiboCrawler(AbstractCrawler):
                     callback=weibo_store.batch_update_weibo_note_comments,
                     max_count=config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES,
                 )
-            except DataFetchError as ex:
-                utils.logger.error(f"[WeiboCrawler.get_note_comments] get note_id: {note_id} comment error: {ex}")
+            except httpx.RequestError as ex:
+                utils.logger.error(
+                    f"[WeiboCrawler.get_note_comments] note_id: {note_id} comments "
+                    f"failed after retries, skipping: {ex}"
+                )
             except Exception as e:
                 utils.logger.error(f"[WeiboCrawler.get_note_comments] may be been blocked, err:{e}")
 
@@ -357,7 +386,7 @@ class WeiboCrawler(AbstractCrawler):
             await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC * 2)
             try:
                 createor_info_res: Dict = await self.wb_client.get_creator_info_by_id(creator_id=user_id)
-            except DataFetchError as e:
+            except httpx.RequestError as e:
                 record_creator_failure("weibo", user_id)
                 utils.logger.warning(f"[WeiboCrawler.get_creators_and_notes] 获取用户 {user_id} 信息失败，已记录并跳过: {e}")
                 continue

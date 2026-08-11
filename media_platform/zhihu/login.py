@@ -90,7 +90,7 @@ class ZhiHuLogin(AbstractLogin):
         if not base64_qrcode_img:
             utils.logger.info("[ZhiHu.login_by_qrcode] login failed , have not found qrcode please check ....")
             if not base64_qrcode_img:
-                sys.exit()
+                sys.exit(1)
 
         # show login qrcode
         # fix issue #12
@@ -105,7 +105,7 @@ class ZhiHuLogin(AbstractLogin):
 
         except RetryError:
             utils.logger.info("[ZhiHu.login_by_qrcode] Login zhihu failed by qrcode login method ...")
-            sys.exit()
+            sys.exit(1)
 
         wait_redirect_seconds = 5
         utils.logger.info(

@@ -81,7 +81,7 @@ class DouYinLogin(AbstractLogin):
             await self.check_login_state()
         except RetryError:
             utils.logger.info("[DouYinLogin.begin] login failed please confirm ...")
-            sys.exit()
+            sys.exit(1)
 
         # wait for redirect
         wait_redirect_seconds = 5
@@ -130,7 +130,7 @@ class DouYinLogin(AbstractLogin):
         )
         if not base64_qrcode_img:
             utils.logger.info("[DouYinLogin.login_by_qrcode] login qrcode not found please confirm ...")
-            sys.exit()
+            sys.exit(1)
 
         partial_show_qrcode = functools.partial(utils.show_qrcode, base64_qrcode_img)
         asyncio.get_running_loop().run_in_executor(executor=None, func=partial_show_qrcode)
@@ -186,7 +186,7 @@ class DouYinLogin(AbstractLogin):
         while not slider_verify_success:
             if max_slider_try_times <= 0:
                 utils.logger.error("[DouYinLogin.check_page_display_slider] slider verify failed ...")
-                sys.exit()
+                sys.exit(1)
             try:
                 await self.move_slider(back_selector, gap_selector, move_step, slider_level)
                 await asyncio.sleep(1)

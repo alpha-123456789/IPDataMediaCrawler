@@ -40,6 +40,10 @@ from .field import *
 from .help import *
 
 
+REQUEST_MAX_ATTEMPTS = 3
+REQUEST_RETRY_BASE_DELAY_SECONDS = 2
+
+
 class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
 
     def __init__(
@@ -120,12 +124,45 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
             a_bogus = await get_a_bogus(uri, query_string, post_data, headers["User-Agent"], self.playwright_page)
             params["a_bogus"] = a_bogus
 
+    async def _send_request_with_retry(
+        self,
+        method: str,
+        url: str,
+        *,
+        follow_redirects: bool = False,
+        **kwargs,
+    ) -> httpx.Response:
+        for attempt in range(1, REQUEST_MAX_ATTEMPTS + 1):
+            try:
+                async with make_async_client(
+                    proxy=self.proxy,
+                    follow_redirects=follow_redirects,
+                ) as client:
+                    return await client.request(
+                        method,
+                        url,
+                        timeout=self.timeout,
+                        **kwargs,
+                    )
+            except httpx.RequestError as exc:
+                if attempt >= REQUEST_MAX_ATTEMPTS:
+                    raise
+
+                retry_delay = REQUEST_RETRY_BASE_DELAY_SECONDS * attempt
+                utils.logger.warning(
+                    f"[DouYinClient.request] Request failed ({type(exc).__name__}), "
+                    f"retrying in {retry_delay} seconds "
+                    f"({attempt}/{REQUEST_MAX_ATTEMPTS}): {url}"
+                )
+                await asyncio.sleep(retry_delay)
+
+        raise RuntimeError("[DouYinClient.request] Request completed without a response")
+
     async def request(self, method, url, **kwargs):
         # Check whether the proxy has expired before each request
         await self._refresh_proxy_if_expired()
 
-        async with make_async_client(proxy=self.proxy) as client:
-            response = await client.request(method, url, timeout=self.timeout, **kwargs)
+        response = await self._send_request_with_retry(method, url, **kwargs)
         try:
             if response.text == "" or response.text == "blocked":
                 utils.logger.error(f"request params incrr, response.text: {response.text}")
@@ -346,18 +383,20 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
         return result
 
     async def get_aweme_media(self, url: str) -> Union[bytes, None]:
-        async with make_async_client(proxy=self.proxy) as client:
-            try:
-                response = await client.request("GET", url, timeout=self.timeout, follow_redirects=True)
-                response.raise_for_status()
-                if not response.reason_phrase == "OK":
-                    utils.logger.error(f"[DouYinClient.get_aweme_media] request {url} err, res:{response.text}")
-                    return None
-                else:
-                    return response.content
-            except httpx.HTTPError as exc:  # some wrong when call httpx.request method, such as connection error, client error, server error or response status code is not 2xx
-                utils.logger.error(f"[DouYinClient.get_aweme_media] {exc.__class__.__name__} for {exc.request.url} - {exc}")  # Keep the original exception type name for developers to debug
+        try:
+            response = await self._send_request_with_retry(
+                "GET",
+                url,
+                follow_redirects=True,
+            )
+            response.raise_for_status()
+            if not response.reason_phrase == "OK":
+                utils.logger.error(f"[DouYinClient.get_aweme_media] request {url} err, res:{response.text}")
                 return None
+            return response.content
+        except httpx.HTTPError as exc:  # some wrong when call httpx.request method, such as connection error, client error, server error or response status code is not 2xx
+            utils.logger.error(f"[DouYinClient.get_aweme_media] {exc.__class__.__name__} for {exc.request.url} - {exc}")  # Keep the original exception type name for developers to debug
+            return None
 
     async def resolve_short_url(self, short_url: str) -> str:
         """
@@ -367,19 +406,22 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
         Returns:
             重定向后的完整URL
         """
-        async with make_async_client(proxy=self.proxy, follow_redirects=False) as client:
-            try:
-                utils.logger.info(f"[DouYinClient.resolve_short_url] Resolving short URL: {short_url}")
-                response = await client.get(short_url, timeout=10)
+        try:
+            utils.logger.info(f"[DouYinClient.resolve_short_url] Resolving short URL: {short_url}")
+            response = await self._send_request_with_retry(
+                "GET",
+                short_url,
+                follow_redirects=False,
+            )
 
-                # Short links usually return a 302 redirect
-                if response.status_code in [301, 302, 303, 307, 308]:
-                    redirect_url = response.headers.get("Location", "")
-                    utils.logger.info(f"[DouYinClient.resolve_short_url] Resolved to: {redirect_url}")
-                    return redirect_url
-                else:
-                    utils.logger.warning(f"[DouYinClient.resolve_short_url] Unexpected status code: {response.status_code}")
-                    return ""
-            except Exception as e:
-                utils.logger.error(f"[DouYinClient.resolve_short_url] Failed to resolve short URL: {e}")
-                return ""
+            # Short links usually return a 302 redirect
+            if response.status_code in [301, 302, 303, 307, 308]:
+                redirect_url = response.headers.get("Location", "")
+                utils.logger.info(f"[DouYinClient.resolve_short_url] Resolved to: {redirect_url}")
+                return redirect_url
+
+            utils.logger.warning(f"[DouYinClient.resolve_short_url] Unexpected status code: {response.status_code}")
+            return ""
+        except httpx.HTTPError as e:
+            utils.logger.error(f"[DouYinClient.resolve_short_url] Failed to resolve short URL after retries: {e}")
+            return ""

@@ -100,7 +100,7 @@ class BaiduTieBaLogin(AbstractLogin):
             )
             if not base64_qrcode_img:
                 utils.logger.info("[BaiduTieBaLogin.login_by_qrcode] login failed , have not found qrcode please check ....")
-                sys.exit()
+                sys.exit(1)
 
         # show login qrcode
         # fix issue #12
@@ -114,7 +114,7 @@ class BaiduTieBaLogin(AbstractLogin):
             await self.check_login_state()
         except RetryError:
             utils.logger.info("[BaiduTieBaLogin.login_by_qrcode] Login baidutieba failed by qrcode login method ...")
-            sys.exit()
+            sys.exit(1)
 
         wait_redirect_seconds = 5
         utils.logger.info(f"[BaiduTieBaLogin.login_by_qrcode] Login successful then wait for {wait_redirect_seconds} seconds redirect ...")

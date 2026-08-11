@@ -44,6 +44,10 @@ from .field import CommentOrderType, SearchOrderType
 from .help import BilibiliSign
 
 
+REQUEST_MAX_ATTEMPTS = 3
+REQUEST_RETRY_BASE_DELAY_SECONDS = 2
+
+
 class BilibiliClient(AbstractApiClient, ProxyRefreshMixin):
 
     def __init__(
@@ -66,12 +70,46 @@ class BilibiliClient(AbstractApiClient, ProxyRefreshMixin):
         # Initialize proxy pool (from ProxyRefreshMixin)
         self.init_proxy_pool(proxy_ip_pool)
 
+    async def _send_request_with_retry(
+        self,
+        method: str,
+        url: str,
+        *,
+        follow_redirects: bool = False,
+        **kwargs,
+    ) -> httpx.Response:
+        for attempt in range(1, REQUEST_MAX_ATTEMPTS + 1):
+            try:
+                async with make_async_client(
+                    proxy=self.proxy,
+                    follow_redirects=follow_redirects,
+                ) as client:
+                    return await client.request(
+                        method,
+                        url,
+                        timeout=self.timeout,
+                        **kwargs,
+                    )
+            except httpx.RequestError as exc:
+                if attempt >= REQUEST_MAX_ATTEMPTS:
+                    raise
+
+                retry_delay = REQUEST_RETRY_BASE_DELAY_SECONDS * attempt
+                utils.logger.warning(
+                    f"[BilibiliClient.request] Request failed ({type(exc).__name__}), "
+                    f"retrying in {retry_delay} seconds "
+                    f"({attempt}/{REQUEST_MAX_ATTEMPTS}): {url}"
+                )
+                await asyncio.sleep(retry_delay)
+
+        raise RuntimeError("[BilibiliClient.request] Request completed without a response")
+
     async def request(self, method, url, **kwargs) -> Any:
         # Check if proxy has expired before each request
         await self._refresh_proxy_if_expired()
 
-        async with make_async_client(proxy=self.proxy) as client:
-            response = await client.request(method, url, timeout=self.timeout, **kwargs)
+        response = await self._send_request_with_retry(method, url, **kwargs)
+
         try:
             data: Dict = response.json()
         except json.JSONDecodeError:
@@ -227,19 +265,23 @@ class BilibiliClient(AbstractApiClient, ProxyRefreshMixin):
 
     async def get_video_media(self, url: str) -> Union[bytes, None]:
         # Follow CDN 302 redirects and treat any 2xx as success (some endpoints return 206)
-        async with make_async_client(proxy=self.proxy, follow_redirects=True) as client:
-            try:
-                response = await client.request("GET", url, timeout=self.timeout, headers=self.headers)
-                response.raise_for_status()
-                if 200 <= response.status_code < 300:
-                    return response.content
-                utils.logger.error(
-                    f"[BilibiliClient.get_video_media] Unexpected status {response.status_code} for {url}"
-                )
-                return None
-            except httpx.HTTPError as exc:  # some wrong when call httpx.request method, such as connection error, client error, server error or response status code is not 2xx
-                utils.logger.error(f"[BilibiliClient.get_video_media] {exc.__class__.__name__} for {exc.request.url} - {exc}")  # Keep original exception type name for developer debugging
-                return None
+        try:
+            response = await self._send_request_with_retry(
+                "GET",
+                url,
+                follow_redirects=True,
+                headers=self.headers,
+            )
+            response.raise_for_status()
+            if 200 <= response.status_code < 300:
+                return response.content
+            utils.logger.error(
+                f"[BilibiliClient.get_video_media] Unexpected status {response.status_code} for {url}"
+            )
+            return None
+        except httpx.HTTPError as exc:  # some wrong when call httpx.request method, such as connection error, client error, server error or response status code is not 2xx
+            utils.logger.error(f"[BilibiliClient.get_video_media] {exc.__class__.__name__} for {exc.request.url} - {exc}")  # Keep original exception type name for developer debugging
+            return None
 
     async def get_video_comments(
         self,

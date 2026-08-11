@@ -21,7 +21,57 @@
 # -*- coding: utf-8 -*-
 
 import re
+
+from playwright.async_api import Page
+
 from model.m_kuaishou import VideoUrlInfo, CreatorUrlInfo
+
+
+KS_SIGN_CAPTURE_SCRIPT = """
+(() => {
+  if (window.__ks_realm) return;
+  let done = false;
+  const setter = function (value) {
+    if (!done && this && typeof this === "object" && this !== window &&
+        typeof this.$encode === "function" &&
+        typeof this.$getCatVersion === "function") {
+      done = true;
+      window.__ks_realm = this;
+      try { delete Object.prototype.caver; } catch (error) {}
+    }
+    Object.defineProperty(this, "caver", {
+      value, writable: true, enumerable: true, configurable: true,
+    });
+  };
+  try {
+    Object.defineProperty(Object.prototype, "caver", {
+      set: setter,
+      configurable: true,
+    });
+  } catch (error) {}
+})();
+"""
+
+
+async def get_ks_sign_from_playwright(
+    page: Page, url: str, query: dict, body: dict
+) -> str:
+    """Generate a Kuaishou REST request signature from the loaded page."""
+    try:
+        await page.wait_for_function("() => !!window.__ks_realm", timeout=15_000)
+    except Exception:
+        await page.reload(wait_until="domcontentloaded")
+        await page.wait_for_function("() => !!window.__ks_realm", timeout=20_000)
+
+    return await page.evaluate(
+        """([url, query, body]) => new Promise((resolve, reject) => {
+            window.__ks_realm.call('$encode', [
+                { url, query, form: {}, requestBody: body },
+                { suc: signature => resolve(signature), err: error => reject(new Error(String(error))) }
+            ]);
+        })""",
+        [url, query, body],
+    )
 
 
 def parse_video_info_from_url(url: str) -> VideoUrlInfo:

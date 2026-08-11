@@ -69,7 +69,12 @@ class WeiboClient(ProxyRefreshMixin):
         # Initialize proxy pool (from ProxyRefreshMixin)
         self.init_proxy_pool(proxy_ip_pool)
 
-    @retry(stop=stop_after_attempt(5), wait=wait_fixed(3), retry=retry_if_not_exception_type(DataFetchError))
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_fixed(3),
+        retry=retry_if_not_exception_type(DataFetchError),
+        reraise=True,
+    )
     async def request(self, method, url, **kwargs) -> Union[Response, Dict]:
         # Check if proxy is expired before each request
         await self._refresh_proxy_if_expired()
@@ -262,20 +267,24 @@ class WeiboClient(ProxyRefreshMixin):
         :return:
         """
         url = f"{self._host}/detail/{note_id}"
-        async with make_async_client(proxy=self.proxy) as client:
-            response = await client.request("GET", url, timeout=self.timeout, headers=self.headers)
-            if response.status_code != 200:
-                raise DataFetchError(f"get weibo detail err: {response.text}")
-            match = re.search(r'var \$render_data = (\[.*?\])\[0\]', response.text, re.DOTALL)
-            if match:
-                render_data_json = match.group(1)
-                render_data_dict = json.loads(render_data_json)
-                note_detail = render_data_dict[0].get("status")
-                note_item = {"mblog": note_detail}
-                return note_item
-            else:
-                utils.logger.info(f"[WeiboClient.get_note_info_by_id] $render_data value not found")
-                return dict()
+        response = await self.request(
+            "GET",
+            url,
+            headers=self.headers,
+            return_response=True,
+        )
+        if response.status_code != 200:
+            raise DataFetchError(f"get weibo detail err: {response.text}")
+        match = re.search(r'var \$render_data = (\[.*?\])\[0\]', response.text, re.DOTALL)
+        if match:
+            render_data_json = match.group(1)
+            render_data_dict = json.loads(render_data_json)
+            note_detail = render_data_dict[0].get("status")
+            note_item = {"mblog": note_detail}
+            return note_item
+
+        utils.logger.info(f"[WeiboClient.get_note_info_by_id] $render_data value not found")
+        return dict()
 
     async def get_note_image(self, image_url: str) -> bytes:
         image_url = image_url[8:]  # Remove https://
@@ -292,18 +301,20 @@ class WeiboClient(ProxyRefreshMixin):
         # Since Weibo images are accessed through i1.wp.com, we need to concatenate the URL
         final_uri = (f"{self._image_agent_host}"
                      f"{image_url}")
-        async with make_async_client(proxy=self.proxy) as client:
-            try:
-                response = await client.request("GET", final_uri, timeout=self.timeout)
-                response.raise_for_status()
-                if not response.reason_phrase == "OK":
-                    utils.logger.error(f"[WeiboClient.get_note_image] request {final_uri} err, res:{response.text}")
-                    return None
-                else:
-                    return response.content
-            except httpx.HTTPError as exc:  # some wrong when call httpx.request method, such as connection error, client error, server error or response status code is not 2xx
-                utils.logger.error(f"[DouYinClient.get_aweme_media] {exc.__class__.__name__} for {exc.request.url} - {exc}")    # Keep original exception type name for developer debugging
+        try:
+            response = await self.request(
+                "GET",
+                final_uri,
+                return_response=True,
+            )
+            response.raise_for_status()
+            if not response.reason_phrase == "OK":
+                utils.logger.error(f"[WeiboClient.get_note_image] request {final_uri} err, res:{response.text}")
                 return None
+            return response.content
+        except httpx.HTTPError as exc:  # some wrong when call httpx.request method, such as connection error, client error, server error or response status code is not 2xx
+            utils.logger.error(f"[WeiboClient.get_note_image] {exc.__class__.__name__} for {exc.request.url} - {exc}")    # Keep original exception type name for developer debugging
+            return None
 
     async def get_creator_container_info(self, creator_id: str) -> Dict:
         """

@@ -23,6 +23,7 @@ import random
 from asyncio import Task
 from typing import Any, Dict, List, Optional, Tuple
 
+import httpx
 from playwright.async_api import (
     BrowserContext,
     BrowserType,
@@ -41,11 +42,14 @@ from store import douyin as douyin_store
 from tools import utils
 from tools.cdp_browser import CDPBrowserManager
 from tools.creator_failure_cache import filter_failed_creator_ids, record_creator_failure
-from tools.crawl_dedup import filter_uncrawled_note_ids
+from tools.crawl_dedup import (
+    filter_note_ids_needing_comment_recovery,
+    filter_uncrawled_note_ids,
+)
+from tools.crawl_progress import emit_keyword_completed
 from var import crawler_type_var, source_keyword_var
 
 from .client import DouYinClient
-from .exception import DataFetchError
 from .field import PublishTimeType
 from .help import parse_video_info_from_url, parse_creator_info_from_url
 from .login import DouYinLogin
@@ -149,6 +153,7 @@ class DouYinCrawler(AbstractCrawler):
             aweme_list: List[str] = []
             page = 0
             dy_search_id = ""
+            keyword_completed = True
             while (page - start_page + 1) * dy_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
                 if page < start_page:
                     utils.logger.info(f"[DouYinCrawler.search] Skip {page}")
@@ -165,12 +170,17 @@ class DouYinCrawler(AbstractCrawler):
                     if posts_res.get("data") is None or posts_res.get("data") == []:
                         utils.logger.info(f"[DouYinCrawler.search] search douyin keyword: {keyword}, page: {page} is empty,{posts_res.get('data')}`")
                         break
-                except DataFetchError:
-                    utils.logger.error(f"[DouYinCrawler.search] search douyin keyword: {keyword} failed")
+                except httpx.RequestError as ex:
+                    keyword_completed = False
+                    utils.logger.error(
+                        f"[DouYinCrawler.search] search douyin keyword: {keyword}, "
+                        f"page: {page} failed after retries, skipping page: {ex}"
+                    )
                     break
 
                 page += 1
                 if "data" not in posts_res:
+                    keyword_completed = False
                     utils.logger.error(f"[DouYinCrawler.search] search douyin keyword: {keyword} failed，账号也许被风控了。")
                     break
                 dy_search_id = posts_res.get("extra", {}).get("logid", "")
@@ -188,24 +198,42 @@ class DouYinCrawler(AbstractCrawler):
                 # Filter out already-crawled notes
                 candidate_ids = [a.get("aweme_id", "") for a in candidate_awemes]
                 uncrawled_ids = set(await filter_uncrawled_note_ids("dy", candidate_ids))
-
+                recovery_aweme_ids = await filter_note_ids_needing_comment_recovery(
+                    "dy", candidate_ids
+                )
                 seen_aweme_ids = set(aweme_list)
-                for aweme_info in candidate_awemes:
+                pending_awemes = [
+                    aweme_info
+                    for aweme_info in candidate_awemes
+                    if aweme_info.get("aweme_id", "") in uncrawled_ids
+                    and aweme_info.get("aweme_id", "") not in seen_aweme_ids
+                ]
+                comment_aweme_ids = {
+                    aweme_info.get("aweme_id", "") for aweme_info in pending_awemes
+                }
+
+                for aweme_info in pending_awemes:
                     aweme_id = aweme_info.get("aweme_id", "")
-                    if aweme_id not in uncrawled_ids or aweme_id in seen_aweme_ids:
-                        continue
                     seen_aweme_ids.add(aweme_id)
                     aweme_list.append(aweme_id)
                     page_aweme_list.append(aweme_id)
                     await douyin_store.update_douyin_aweme(aweme_item=aweme_info)
                     await self.get_aweme_media(aweme_item=aweme_info)
-                # Batch get note comments for the current page
-                await self.batch_get_note_comments(page_aweme_list)
+                # Batch get new-post comments and recovery comments for this page.
+                await self.batch_get_note_comments(
+                    recovery_aweme_ids
+                    + [
+                        aweme_id for aweme_id in page_aweme_list
+                        if str(aweme_id) in comment_aweme_ids
+                    ]
+                )
 
                 # Sleep after each page navigation
                 await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
                 utils.logger.info(f"[DouYinCrawler.search] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after page {page-1}")
             utils.logger.info(f"[DouYinCrawler.search] keyword:{keyword}, aweme_list:{aweme_list}")
+            if keyword_completed:
+                emit_keyword_completed(config.PLATFORM, keyword)
 
     async def get_specified_awemes(self):
         """Get the information and comments of the specified post from URLs or IDs"""
@@ -251,11 +279,20 @@ class DouYinCrawler(AbstractCrawler):
                 await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
                 utils.logger.info(f"[DouYinCrawler.get_aweme_detail] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after fetching aweme {aweme_id}")
                 return result
-            except DataFetchError as ex:
-                utils.logger.error(f"[DouYinCrawler.get_aweme_detail] Get aweme detail error: {ex}")
+            except httpx.RequestError as ex:
+                utils.logger.error(
+                    f"[DouYinCrawler.get_aweme_detail] Get aweme {aweme_id} detail "
+                    f"failed after retries, skipping: {ex}"
+                )
                 return None
             except KeyError as ex:
                 utils.logger.error(f"[DouYinCrawler.get_aweme_detail] have not fund note detail aweme_id:{aweme_id}, err: {ex}")
+                return None
+            except Exception as ex:
+                utils.logger.error(
+                    f"[DouYinCrawler.get_aweme_detail] aweme_id: {aweme_id} "
+                    f"detail failed, skipping: {ex}"
+                )
                 return None
 
     async def batch_get_note_comments(self, aweme_list: List[str]) -> None:
@@ -291,8 +328,16 @@ class DouYinCrawler(AbstractCrawler):
                 await asyncio.sleep(crawl_interval)
                 utils.logger.info(f"[DouYinCrawler.get_comments] Sleeping for {crawl_interval} seconds after fetching comments for aweme {aweme_id}")
                 utils.logger.info(f"[DouYinCrawler.get_comments] aweme_id: {aweme_id} comments have all been obtained and filtered ...")
-            except DataFetchError as e:
-                utils.logger.error(f"[DouYinCrawler.get_comments] aweme_id: {aweme_id} get comments failed, error: {e}")
+            except httpx.RequestError as e:
+                utils.logger.error(
+                    f"[DouYinCrawler.get_comments] aweme_id: {aweme_id} comments "
+                    f"failed after retries, skipping: {e}"
+                )
+            except Exception as e:
+                utils.logger.error(
+                    f"[DouYinCrawler.get_comments] aweme_id: {aweme_id} comments "
+                    f"failed, skipping: {e}"
+                )
 
     async def _get_uncrawled_creator_ids(self) -> List[str]:
         """从 douyin_aweme 查 sec_uid，减去 dy_creator 已有的，返回差集"""
@@ -314,7 +359,7 @@ class DouYinCrawler(AbstractCrawler):
             await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
             try:
                 creator_info: Dict = await self.dy_client.get_user_info(user_id)
-            except DataFetchError as ex:
+            except httpx.RequestError as ex:
                 record_creator_failure("dy", user_id)
                 utils.logger.warning(f"[DouYinCrawler] 记录失败创作者并跳过: {user_id}, {ex}")
                 continue

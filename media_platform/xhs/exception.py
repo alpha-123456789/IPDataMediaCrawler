@@ -18,7 +18,9 @@
 # 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
 
 
-from httpx import RequestError
+from typing import Optional
+
+from httpx import Request, RequestError
 
 
 class DataFetchError(RequestError):
@@ -35,3 +37,23 @@ class NoteNotFoundError(RequestError):
 
 class CaptchaError(RequestError):
     """CAPTCHA verification required"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        request: Optional[Request] = None,
+        verify_type: str = "",
+        verify_uuid: str = "",
+        verify_biz: str = "",
+        status_code: Optional[int] = None,
+        response_text: str = "",
+        redirect_url: str = "",
+    ) -> None:
+        super().__init__(message, request=request)
+        self.verify_type = verify_type
+        self.verify_uuid = verify_uuid
+        self.verify_biz = verify_biz
+        self.status_code = status_code
+        self.response_text = response_text
+        self.redirect_url = redirect_url

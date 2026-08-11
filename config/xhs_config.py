@@ -20,6 +20,9 @@
 
 # Xiaohongshu platform configuration
 
+# Fixed delay between Xiaohongshu crawl requests (seconds)
+XHS_CRAWLER_SLEEP_SEC = 5
+
 # Sorting method, the specific enumeration value is in media_platform/xhs/field.py
 # SORT_TYPE = "popularity_descending"
 SORT_TYPE = ""

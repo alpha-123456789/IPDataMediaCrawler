@@ -29,6 +29,7 @@ from asyncio import Task
 from typing import Dict, List, Optional, Tuple, Union
 from datetime import datetime, timedelta
 import pandas as pd
+import httpx
 
 from playwright.async_api import (
     BrowserContext,
@@ -49,7 +50,11 @@ from store import bilibili as bilibili_store
 from tools import utils
 from tools.cdp_browser import CDPBrowserManager
 from tools.creator_failure_cache import filter_failed_creator_ids, record_creator_failure
-from tools.crawl_dedup import filter_uncrawled_note_ids
+from tools.crawl_dedup import (
+    filter_note_ids_needing_comment_recovery,
+    filter_uncrawled_note_ids,
+)
+from tools.crawl_progress import emit_keyword_completed
 from var import crawler_type_var, source_keyword_var
 
 from .client import BilibiliClient
@@ -201,6 +206,7 @@ class BilibiliCrawler(AbstractCrawler):
             source_keyword_var.set(keyword)
             utils.logger.info(f"[BilibiliCrawler.search_by_keywords] Current search keyword: {keyword}")
             page = 1
+            keyword_completed = True
             while (page - start_page + 1) * bili_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
                 if page < start_page:
                     utils.logger.info(f"[BilibiliCrawler.search_by_keywords] Skip page: {page}")
@@ -209,14 +215,22 @@ class BilibiliCrawler(AbstractCrawler):
 
                 utils.logger.info(f"[BilibiliCrawler.search_by_keywords] search bilibili keyword: {keyword}, page: {page}")
                 video_id_list: List[str] = []
-                videos_res = await self.bili_client.search_video_by_keyword(
-                    keyword=keyword,
-                    page=page,
-                    page_size=bili_limit_count,
-                    order=SearchOrderType.DEFAULT,
-                    pubtime_begin_s=0,  # Publish date start timestamp
-                    pubtime_end_s=0,  # Publish date end timestamp
-                )
+                try:
+                    videos_res = await self.bili_client.search_video_by_keyword(
+                        keyword=keyword,
+                        page=page,
+                        page_size=bili_limit_count,
+                        order=SearchOrderType.DEFAULT,
+                        pubtime_begin_s=0,  # Publish date start timestamp
+                        pubtime_end_s=0,  # Publish date end timestamp
+                    )
+                except httpx.RequestError as ex:
+                    keyword_completed = False
+                    utils.logger.error(
+                        f"[BilibiliCrawler.search_by_keywords] Keyword {keyword}, page {page} "
+                        f"failed after retries, skipping page: {ex}"
+                    )
+                    break
                 video_list: List[Dict] = videos_res.get("result")
 
                 if not video_list:
@@ -226,12 +240,21 @@ class BilibiliCrawler(AbstractCrawler):
                 # Filter out already-crawled videos before fetching details
                 candidate_aids = [str(video_item.get("aid", "")) for video_item in video_list]
                 uncrawled_aids = set(await filter_uncrawled_note_ids("bili", candidate_aids))
+                recovery_aids = await filter_note_ids_needing_comment_recovery(
+                    "bili", candidate_aids
+                )
                 video_list = [v for v in video_list if str(v.get("aid", "")) in uncrawled_aids]
 
                 if not video_list:
-                    utils.logger.info("[BilibiliCrawler.search_by_keywords] All videos on this page already crawled, skipping")
+                    if recovery_aids:
+                        await self.batch_get_video_comments(recovery_aids)
+                    else:
+                        utils.logger.info("[BilibiliCrawler.search_by_keywords] All videos on this page already crawled, skipping")
                     page += 1
                     continue
+                comment_aids = {
+                    str(video_item.get("aid", "")) for video_item in video_list
+                }
 
                 semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
                 task_list = []
@@ -248,7 +271,8 @@ class BilibiliCrawler(AbstractCrawler):
                     desc = view.get("desc", "")
                     aid = view.get("aid", "")
                     if keyword in title or keyword in desc:
-                        video_id_list.append(aid)
+                        if str(aid) in comment_aids:
+                            video_id_list.append(aid)
                         await bilibili_store.update_bilibili_video(video_item)
                         await bilibili_store.update_up_info(video_item)
                         await self.get_bilibili_video(video_item, semaphore)
@@ -262,7 +286,9 @@ class BilibiliCrawler(AbstractCrawler):
                 await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
                 utils.logger.info(f"[BilibiliCrawler.search_by_keywords] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after page {page-1}")
 
-                await self.batch_get_video_comments(video_id_list)
+                await self.batch_get_video_comments(recovery_aids + video_id_list)
+            if keyword_completed:
+                emit_keyword_completed(config.PLATFORM, keyword)
 
     async def search_by_keywords_in_time_range(self, daily_limit: bool):
         """
@@ -277,6 +303,7 @@ class BilibiliCrawler(AbstractCrawler):
             source_keyword_var.set(keyword)
             utils.logger.info(f"[BilibiliCrawler.search_by_keywords_in_time_range] Current search keyword: {keyword}")
             total_notes_crawled_for_keyword = 0
+            keyword_completed = True
 
             for day in pd.date_range(start=config.START_DAY, end=config.END_DAY, freq="D"):
                 if (daily_limit and total_notes_crawled_for_keyword >= config.CRAWLER_MAX_NOTES_COUNT):
@@ -321,12 +348,21 @@ class BilibiliCrawler(AbstractCrawler):
                         # Filter out already-crawled videos before fetching details
                         candidate_aids = [str(video_item.get("aid", "")) for video_item in video_list]
                         uncrawled_aids = set(await filter_uncrawled_note_ids("bili", candidate_aids))
+                        recovery_aids = await filter_note_ids_needing_comment_recovery(
+                            "bili", candidate_aids
+                        )
                         video_list = [v for v in video_list if str(v.get("aid", "")) in uncrawled_aids]
 
                         if not video_list:
-                            utils.logger.info(f"[BilibiliCrawler.search] All videos on this page already crawled, skipping")
+                            if recovery_aids:
+                                await self.batch_get_video_comments(recovery_aids)
+                            else:
+                                utils.logger.info(f"[BilibiliCrawler.search] All videos on this page already crawled, skipping")
                             page += 1
                             continue
+                        comment_aids = {
+                            str(video_item.get("aid", "")) for video_item in video_list
+                        }
 
                         semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
                         task_list = [self.get_video_info_task(aid=video_item.get("aid"), bvid="", semaphore=semaphore) for video_item in video_list]
@@ -342,7 +378,9 @@ class BilibiliCrawler(AbstractCrawler):
                                     break
                                 notes_count_this_day += 1
                                 total_notes_crawled_for_keyword += 1
-                                video_id_list.append(video_item.get("View").get("aid"))
+                                aid = video_item.get("View").get("aid")
+                                if str(aid) in comment_aids:
+                                    video_id_list.append(aid)
                                 await bilibili_store.update_bilibili_video(video_item)
                                 await bilibili_store.update_up_info(video_item)
                                 await self.get_bilibili_video(video_item, semaphore)
@@ -353,11 +391,14 @@ class BilibiliCrawler(AbstractCrawler):
                         await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
                         utils.logger.info(f"[BilibiliCrawler.search_by_keywords_in_time_range] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after page {page-1}")
 
-                        await self.batch_get_video_comments(video_id_list)
+                        await self.batch_get_video_comments(recovery_aids + video_id_list)
 
                     except Exception as e:
+                        keyword_completed = False
                         utils.logger.error(f"[BilibiliCrawler.search] Error searching on {day.ctime()}: {e}")
                         break
+            if keyword_completed:
+                emit_keyword_completed(config.PLATFORM, keyword)
 
     async def batch_get_video_comments(self, video_id_list: List[str]):
         """
@@ -397,12 +438,16 @@ class BilibiliCrawler(AbstractCrawler):
                     max_count=config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES,
                 )
 
-            except DataFetchError as ex:
-                utils.logger.error(f"[BilibiliCrawler.get_comments] get video_id: {video_id} comment error: {ex}")
-            except Exception as e:
-                utils.logger.error(f"[BilibiliCrawler.get_comments] may be been blocked, err:{e}")
-                # Propagate the exception to be caught by the main loop
-                raise
+            except httpx.RequestError as ex:
+                utils.logger.error(
+                    f"[BilibiliCrawler.get_comments] Video {video_id} comments failed "
+                    f"after retries, skipping: {ex}"
+                )
+            except Exception as ex:
+                utils.logger.error(
+                    f"[BilibiliCrawler.get_comments] Video {video_id} comments "
+                    f"failed, skipping: {ex}"
+                )
 
     async def get_creator_videos(self, creator_id: int):
         """
@@ -412,7 +457,14 @@ class BilibiliCrawler(AbstractCrawler):
         ps = 30
         pn = 1
         while True:
-            result = await self.bili_client.get_creator_videos(creator_id, pn, ps)
+            try:
+                result = await self.bili_client.get_creator_videos(creator_id, pn, ps)
+            except httpx.RequestError as ex:
+                utils.logger.error(
+                    f"[BilibiliCrawler.get_creator_videos] Creator {creator_id}, page {pn} "
+                    f"failed after retries, skipping creator: {ex}"
+                )
+                break
             video_bvids_list = [video["bvid"] for video in result["list"]["vlist"]]
             await self.get_specified_videos(video_bvids_list)
             if int(result["page"]["count"]) <= pn * ps:
@@ -476,6 +528,18 @@ class BilibiliCrawler(AbstractCrawler):
             except KeyError as ex:
                 utils.logger.error(f"[BilibiliCrawler.get_video_info_task] have not fund note detail video_id:{bvid}, err: {ex}")
                 return None
+            except httpx.RequestError as ex:
+                utils.logger.error(
+                    f"[BilibiliCrawler.get_video_info_task] Skip video after request retries "
+                    f"video_id:{bvid or aid}, err:{type(ex).__name__}: {ex}"
+                )
+                return None
+            except Exception as ex:
+                utils.logger.error(
+                    f"[BilibiliCrawler.get_video_info_task] Skip video "
+                    f"video_id:{bvid or aid}, err:{type(ex).__name__}: {ex}"
+                )
+                return None
 
     async def get_video_play_url_task(self, aid: int, cid: int, semaphore: asyncio.Semaphore) -> Union[Dict, None]:
         """
@@ -494,6 +558,18 @@ class BilibiliCrawler(AbstractCrawler):
                 return None
             except KeyError as ex:
                 utils.logger.error(f"[BilibiliCrawler.get_video_play_url_task] have not fund play url from :{aid}|{cid}, err: {ex}")
+                return None
+            except httpx.RequestError as ex:
+                utils.logger.error(
+                    f"[BilibiliCrawler.get_video_play_url_task] Video {aid} play URL "
+                    f"failed after retries, skipping media: {ex}"
+                )
+                return None
+            except Exception as ex:
+                utils.logger.error(
+                    f"[BilibiliCrawler.get_video_play_url_task] Video {aid} play URL "
+                    f"failed, skipping media: {ex}"
+                )
                 return None
 
     async def create_bilibili_client(self, httpx_proxy: Optional[str]) -> BilibiliClient:
@@ -681,7 +757,7 @@ class BilibiliCrawler(AbstractCrawler):
         try:
             async with semaphore:
                 creator_unhandled_info: Dict = await self.bili_client.get_creator_info(creator_id)
-        except DataFetchError as ex:
+        except httpx.RequestError as ex:
             record_creator_failure("bili", creator_id)
             utils.logger.warning(f"[BilibiliCrawler] 记录失败UP主并跳过: {creator_id}, {ex}")
             return
