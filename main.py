@@ -115,6 +115,9 @@ async def main() -> None:
         print(f"[Main] CDP 浏览器端口已被占用，有其他抓取进程正在运行，本次启动终止")
         sys.exit(1)
 
+    if config.SAVE_DATA_OPTION in ("sqlite", "mysql", "db", "postgres"):
+        await db.init_db(config.SAVE_DATA_OPTION)
+
     crawler = CrawlerFactory.create_crawler(platform=config.PLATFORM)
     await crawler.start()
 

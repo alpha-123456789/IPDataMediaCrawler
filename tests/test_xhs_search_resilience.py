@@ -106,6 +106,62 @@ async def test_search_skips_existing_note_before_detail_and_comments(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_search_processes_last_page_when_has_more_is_false(monkeypatch):
+    monkeypatch.setattr(config, "KEYWORDS", "test-keyword")
+    monkeypatch.setattr(config, "CRAWLER_MAX_NOTES_COUNT", 20)
+    monkeypatch.setattr(config, "START_PAGE", 1)
+    monkeypatch.setattr(config, "SORT_TYPE", "")
+    monkeypatch.setattr(config, "MAX_CONCURRENCY_NUM", 1)
+
+    monkeypatch.setattr(
+        "media_platform.xhs.core.filter_uncrawled_note_ids",
+        AsyncMock(return_value=["note-1"]),
+    )
+    monkeypatch.setattr(
+        "media_platform.xhs.core.filter_note_ids_needing_comment_recovery",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        "media_platform.xhs.core.asyncio.sleep",
+        AsyncMock(),
+    )
+
+    crawler = XiaoHongShuCrawler()
+    crawler.xhs_client = AsyncMock()
+    crawler.xhs_client.get_note_by_keyword.return_value = {
+        "has_more": False,
+        "items": [
+            {
+                "id": "note-1",
+                "model_type": "note",
+                "xsec_source": "pc_search",
+                "xsec_token": "token-1",
+            }
+        ],
+    }
+    crawler.get_note_detail_async_task = AsyncMock(
+        return_value={
+            "note_id": "note-1",
+            "title": "test-keyword",
+            "desc": "",
+            "xsec_token": "token-1",
+        }
+    )
+    monkeypatch.setattr(
+        "media_platform.xhs.core.xhs_store.update_xhs_note",
+        AsyncMock(),
+    )
+    crawler.get_notice_media = AsyncMock()
+    crawler.batch_get_note_comments = AsyncMock()
+
+    await crawler.search()
+
+    crawler.get_note_detail_async_task.assert_awaited_once()
+    crawler.xhs_client.get_note_by_keyword.assert_awaited_once()
+    assert crawler.success == 1
+
+
+@pytest.mark.asyncio
 async def test_search_recovers_missing_comments_without_fetching_existing_note(monkeypatch):
     monkeypatch.setattr(config, "KEYWORDS", "test-keyword")
     monkeypatch.setattr(config, "CRAWLER_MAX_NOTES_COUNT", 20)

@@ -44,6 +44,11 @@ from tools.crawl_dedup import (
     filter_uncrawled_note_ids,
 )
 from tools.crawl_progress import emit_keyword_completed
+from tools.keyword_date_filter import (
+    extract_publication_time,
+    get_keyword_date_range,
+    is_post_within_keyword_date_range,
+)
 from var import crawler_type_var, source_keyword_var
 
 from .client import KuaiShouClient
@@ -141,8 +146,6 @@ class KuaishouCrawler(AbstractCrawler):
     async def search(self):
         utils.logger.info("[KuaishouCrawler.search] Begin search kuaishou keywords")
         ks_limit_count = 20
-        if config.CRAWLER_MAX_NOTES_COUNT < ks_limit_count:
-            config.CRAWLER_MAX_NOTES_COUNT = ks_limit_count
         start_page = config.START_PAGE
 
         for keyword in config.KEYWORDS.split(","):
@@ -150,13 +153,20 @@ class KuaishouCrawler(AbstractCrawler):
             utils.logger.info(
                 f"[KuaishouCrawler.search] Current search keyword: {keyword}"
             )
+            keyword_max_note_count = config.KEYWORD_MAX_NOTE_COUNTS.get(
+                keyword,
+                config.CRAWLER_MAX_NOTES_COUNT,
+            )
+            max_pages = max(
+                1,
+                (keyword_max_note_count + ks_limit_count - 1) // ks_limit_count,
+            )
             keyword_completed = True
+            keyword_crawled_count = 0
             search_session_id = ""
             page = 1
 
-            while (
-                page - start_page + 1
-            ) * ks_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
+            while page < start_page + max_pages:
                 if page < start_page:
                     utils.logger.info(f"[KuaishouCrawler.search] Skip page: {page}")
                     page += 1
@@ -189,7 +199,31 @@ class KuaishouCrawler(AbstractCrawler):
                     break
 
                 search_session_id = videos_res.get("searchSessionId", "")
-                feeds = videos_res.get("feeds", [])
+                raw_feeds = videos_res.get("feeds", [])
+                feeds = [
+                    video_detail
+                    for video_detail in raw_feeds
+                    if is_post_within_keyword_date_range(
+                        keyword,
+                        extract_publication_time(video_detail),
+                    )
+                ]
+                remaining_count = keyword_max_note_count - keyword_crawled_count
+                if remaining_count <= 0:
+                    break
+                feeds = feeds[:remaining_count]
+                date_range = get_keyword_date_range(keyword)
+                if date_range is not None:
+                    timestamp_samples = [
+                        repr(extract_publication_time(video_detail))
+                        for video_detail in raw_feeds[:3]
+                    ]
+                    utils.logger.info(
+                        f"[KuaishouCrawler.search] keyword:{keyword}, page:{page}, "
+                        f"date range:{date_range[0]} to {date_range[1]}, "
+                        f"received {len(raw_feeds)} videos, matched {len(feeds)}, "
+                        f"timestamp samples:{timestamp_samples}"
+                    )
                 candidate_ids = [
                     (video_detail.get("photo") or {}).get("id")
                     for video_detail in feeds
@@ -207,6 +241,7 @@ class KuaishouCrawler(AbstractCrawler):
                     await kuaishou_store.update_kuaishou_video(
                         video_item=video_detail
                     )
+                    keyword_crawled_count += 1
                     video_id_list.append(video_id)
 
                 utils.logger.info(
@@ -215,9 +250,7 @@ class KuaishouCrawler(AbstractCrawler):
                 )
                 await self.batch_get_video_comments(video_id_list)
                 page += 1
-                if (
-                    page - start_page + 1
-                ) * ks_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
+                if page < start_page + max_pages:
                     await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
 
             if keyword_completed:

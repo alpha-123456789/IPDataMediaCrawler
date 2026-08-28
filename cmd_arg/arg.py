@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 
+import json
 import sys
 import re
 from enum import Enum
@@ -31,6 +32,7 @@ import typer
 from typing_extensions import Annotated
 
 import config
+from tools.keyword_date_filter import normalize_keyword_date_ranges
 from tools.utils import str2bool
 
 
@@ -151,6 +153,87 @@ def _normalize_tieba_creator_url(value: str) -> str:
     return f"https://tieba.baidu.com/home/main?id={value}"
 
 
+def _normalize_keyword_sort_modes(value) -> dict[str, int]:
+    """Validate per-keyword sort modes from crawler_keyword."""
+    if not isinstance(value, dict):
+        raise ValueError("must be a JSON object")
+
+    normalized = {}
+    for keyword, mode in value.items():
+        if not isinstance(keyword, str) or not keyword.strip():
+            raise ValueError("keyword_sort_modes keys must be non-empty strings")
+        if isinstance(mode, bool) or mode not in (0, 1, "0", "1"):
+            raise ValueError(
+                f"keyword '{keyword}' sort_mode must be 0 (comprehensive) or 1 (latest)"
+            )
+        normalized[keyword.strip()] = int(mode)
+    return normalized
+
+
+def _normalize_keyword_filter_note_times(value) -> dict[str, str]:
+    """Normalize per-keyword XHS note-time filters for the search request."""
+    if not isinstance(value, dict):
+        raise ValueError("must be a JSON object")
+
+    labels = {
+        0: "不限",
+        1: "一天内",
+        2: "一周内",
+        3: "半年内",
+    }
+    normalized = {}
+    for keyword, filter_note_time in value.items():
+        if not isinstance(keyword, str) or not keyword.strip():
+            raise ValueError(
+                "keyword_filter_note_times keys must be non-empty strings"
+            )
+        if isinstance(filter_note_time, bool):
+            raise ValueError(
+                f"keyword '{keyword}' filter_note_time must be 0, 1, 2, or 3"
+            )
+
+        if isinstance(filter_note_time, int):
+            filter_value = labels.get(filter_note_time)
+        else:
+            text_value = str(filter_note_time).strip()
+            filter_value = labels.get(int(text_value)) if text_value.isdigit() else text_value
+
+        if filter_value not in labels.values():
+            raise ValueError(
+                f"keyword '{keyword}' filter_note_time must be 0, 1, 2, 3, "
+                "or one of: 不限, 一天内, 一周内, 半年内"
+            )
+        normalized[keyword.strip()] = filter_value
+    return normalized
+
+
+def _normalize_keyword_max_note_counts(value) -> dict[str, int]:
+    """Validate per-keyword maximum note counts."""
+    if not isinstance(value, dict):
+        raise ValueError("must be a JSON object")
+
+    normalized = {}
+    for keyword, max_note_count in value.items():
+        if not isinstance(keyword, str) or not keyword.strip():
+            raise ValueError("keyword_max_note_counts keys must be non-empty strings")
+        if isinstance(max_note_count, bool):
+            raise ValueError(
+                f"keyword '{keyword}' max_note_count must be a positive integer"
+            )
+        try:
+            count = int(str(max_note_count).strip())
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"keyword '{keyword}' max_note_count must be a positive integer"
+            ) from exc
+        if count <= 0 or str(max_note_count).strip() != str(count):
+            raise ValueError(
+                f"keyword '{keyword}' max_note_count must be a positive integer"
+            )
+        normalized[keyword.strip()] = count
+    return normalized
+
+
 async def parse_cmd(argv: Optional[Sequence[str]] = None):
     """Parse command line arguments using Typer."""
 
@@ -198,6 +281,38 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
                 rich_help_panel="Basic Configuration",
             ),
         ] = config.KEYWORDS,
+        keyword_date_ranges: Annotated[
+            str,
+            typer.Option(
+                "--keyword_date_ranges",
+                help="Per-keyword publication date ranges as a JSON object",
+                rich_help_panel="Basic Configuration",
+            ),
+        ] = "",
+        keyword_sort_modes: Annotated[
+            str,
+            typer.Option(
+                "--keyword_sort_modes",
+                help="Per-keyword search sort modes as a JSON object (0=comprehensive, 1=latest)",
+                rich_help_panel="Basic Configuration",
+            ),
+        ] = "",
+        keyword_filter_note_times: Annotated[
+            str,
+            typer.Option(
+                "--keyword_filter_note_times",
+                help="Per-keyword Xiaohongshu note-time filters as a JSON object (0=unlimited, 1=within 1 day, 2=within 1 week, 3=within 6 months)",
+                rich_help_panel="Basic Configuration",
+            ),
+        ] = "",
+        keyword_max_note_counts: Annotated[
+            str,
+            typer.Option(
+                "--keyword_max_note_counts",
+                help="Per-keyword maximum search note counts as a JSON object",
+                rich_help_panel="Basic Configuration",
+            ),
+        ] = "",
         get_comment: Annotated[
             str,
             typer.Option(
@@ -340,6 +455,42 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
         enable_headless = _to_bool(headless)
         enable_ip_proxy_value = _to_bool(enable_ip_proxy)
         init_db_value = init_db.value if init_db else None
+        try:
+            parsed_keyword_date_ranges = normalize_keyword_date_ranges(
+                json.loads(keyword_date_ranges) if keyword_date_ranges else {}
+            )
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise typer.BadParameter(
+                f"Invalid --keyword_date_ranges: {exc}"
+            ) from exc
+        try:
+            parsed_keyword_sort_modes = _normalize_keyword_sort_modes(
+                json.loads(keyword_sort_modes) if keyword_sort_modes else {}
+            )
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise typer.BadParameter(
+                f"Invalid --keyword_sort_modes: {exc}"
+            ) from exc
+        try:
+            parsed_keyword_filter_note_times = _normalize_keyword_filter_note_times(
+                json.loads(keyword_filter_note_times)
+                if keyword_filter_note_times
+                else {}
+            )
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise typer.BadParameter(
+                f"Invalid --keyword_filter_note_times: {exc}"
+            ) from exc
+        try:
+            parsed_keyword_max_note_counts = _normalize_keyword_max_note_counts(
+                json.loads(keyword_max_note_counts)
+                if keyword_max_note_counts
+                else {}
+            )
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise typer.BadParameter(
+                f"Invalid --keyword_max_note_counts: {exc}"
+            ) from exc
 
         # Parse specified_id and creator_id into lists
         specified_id_list = [id.strip() for id in specified_id.split(",") if id.strip()] if specified_id else []
@@ -351,6 +502,10 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
         config.CRAWLER_TYPE = crawler_type.value
         config.START_PAGE = start
         config.KEYWORDS = keywords
+        config.KEYWORD_DATE_RANGES = parsed_keyword_date_ranges
+        config.KEYWORD_SORT_MODES = parsed_keyword_sort_modes
+        config.KEYWORD_FILTER_NOTE_TIMES = parsed_keyword_filter_note_times
+        config.KEYWORD_MAX_NOTE_COUNTS = parsed_keyword_max_note_counts
         config.ENABLE_GET_COMMENTS = enable_comment
         config.ENABLE_GET_SUB_COMMENTS = enable_sub_comment
         config.HEADLESS = enable_headless
@@ -407,6 +562,10 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
             type=config.CRAWLER_TYPE,
             start=config.START_PAGE,
             keywords=config.KEYWORDS,
+            keyword_date_ranges=config.KEYWORD_DATE_RANGES,
+            keyword_sort_modes=config.KEYWORD_SORT_MODES,
+            keyword_filter_note_times=config.KEYWORD_FILTER_NOTE_TIMES,
+            keyword_max_note_counts=config.KEYWORD_MAX_NOTE_COUNTS,
             get_comment=config.ENABLE_GET_COMMENTS,
             get_sub_comment=config.ENABLE_GET_SUB_COMMENTS,
             headless=config.HEADLESS,

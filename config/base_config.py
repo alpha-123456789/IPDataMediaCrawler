@@ -25,6 +25,10 @@ PLATFORM = "xhs"  # Platform, xhs | dy | ks | bili | wb | tieba | zhihu
 XHS_INTERNATIONAL = False
 
 KEYWORDS = "编程副业,编程兼职"  # Keyword search configuration, separated by English commas
+KEYWORD_DATE_RANGES = {}  # Per-keyword publication date ranges from crawler_keyword
+KEYWORD_SORT_MODES = {}  # Per-keyword search sort modes: 0=comprehensive, 1=latest
+KEYWORD_FILTER_NOTE_TIMES = {}  # Per-keyword XHS note time filters: 0=unlimited, 1=within 1 day, 2=within 1 week, 3=within 6 months
+KEYWORD_MAX_NOTE_COUNTS = {}  # Per-keyword maximum search note counts; empty uses CRAWLER_MAX_NOTES_COUNT
 LOGIN_TYPE = "qrcode"  # qrcode or phone or cookie
 COOKIES = ""
 CRAWLER_TYPE = (

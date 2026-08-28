@@ -361,6 +361,7 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
         page_size: int = 20,
         sort: SearchSortType = SearchSortType.GENERAL,
         note_type: SearchNoteType = SearchNoteType.ALL,
+        filter_note_time: str = "不限",
     ) -> Dict:
         """
         Search notes by keyword
@@ -370,6 +371,7 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
             page_size: Page data length
             sort: Search result sorting specification
             note_type: Type of note to search
+            filter_note_time: Xiaohongshu note-time filter label
 
         Returns:
 
@@ -380,8 +382,22 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
             "page": page,
             "page_size": page_size,
             "search_id": search_id,
-            "sort": sort.value,
+            # The web search request keeps the legacy top-level sort as general.
+            # The active sort is carried by filters.sort_type.
+            "sort": SearchSortType.GENERAL.value,
             "note_type": note_type.value,
+            "ext_flags": [],
+            "filters": [
+                {"tags": [sort.value], "type": "sort_type"},
+                {"tags": ["不限"], "type": "filter_note_type"},
+                {"tags": [filter_note_time], "type": "filter_note_time"},
+                {"tags": ["不限"], "type": "filter_note_range"},
+                {"tags": ["不限"], "type": "filter_pos_distance"},
+            ],
+            "geo": "",
+            "image_formats": ["jpg", "webp", "avif"],
+            "message_id": "",
+            "session_id": "",
         }
         return await self.post(uri, data)
 

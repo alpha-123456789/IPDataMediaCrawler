@@ -12,8 +12,8 @@
   # 按分组生成（使用 config.py 中 IP_KEYWORDS 的分组名）
   uv run custom/keyword_insight/batch_report.py --group 猴子警长系列
 
-  # 启用 LLM + 参考资料
-  uv run custom/keyword_insight/batch_report.py --llm --ref reference.txt
+  # 使用参考资料生成 AI 报告
+  uv run custom/keyword_insight/batch_report.py --ref reference.txt
 
   # 列出数据库中所有可用关键词
   uv run custom/keyword_insight/batch_report.py --list
@@ -35,7 +35,7 @@ def main():
     parser.add_argument("keywords", nargs="*", help="指定关键词，不传则生成全部")
     parser.add_argument("--group", "-g", type=str, default=None,
                         help="按 config.py 中的分组名筛选（如 '猴子警长系列'）")
-    parser.add_argument("--llm", action="store_true", help="启用 LLM 生成摘要")
+    parser.add_argument("--llm", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--ref", type=str, default="", help="参考资料文件路径")
     parser.add_argument("--list", "-l", action="store_true", help="列出数据库中所有可用关键词")
     parser.add_argument("--force", "-f", action="store_true", help="强制重新生成已有报告的关键词（默认跳过）")
@@ -94,7 +94,7 @@ def main():
 
     print(f"\n{'='*60}")
     print(f"待生成报告：{len(valid_keywords)} 个关键词")
-    print(f"LLM 模式：{'开启' if args.llm else '关闭'}")
+    print("LLM 模式：开启")
     print(f"{'='*60}\n")
 
     generator = Generator()
@@ -113,7 +113,7 @@ def main():
         print(f"\n[{i}/{len(valid_keywords)}] 生成报告：{keyword}")
         print("-" * 40)
         try:
-            generator.run_one(keyword, use_llm=args.llm, reference_content=reference_content, report_month=args.month)
+            generator.run_one(keyword, use_llm=True, reference_content=reference_content, report_month=args.month)
             success += 1
         except Exception as e:
             print(f"[失败] {keyword}: {e}")

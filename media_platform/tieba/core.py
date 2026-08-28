@@ -155,18 +155,23 @@ class TieBaCrawler(AbstractCrawler):
             "[BaiduTieBaCrawler.search] Begin search baidu tieba keywords"
         )
         tieba_limit_count = 10  # tieba limit page fixed value
-        if config.CRAWLER_MAX_NOTES_COUNT < tieba_limit_count:
-            config.CRAWLER_MAX_NOTES_COUNT = tieba_limit_count
         start_page = config.START_PAGE
         for keyword in config.KEYWORDS.split(","):
             source_keyword_var.set(keyword)
             utils.logger.info(
                 f"[BaiduTieBaCrawler.search] Current search keyword: {keyword}"
             )
+            keyword_max_note_count = config.KEYWORD_MAX_NOTE_COUNTS.get(
+                keyword,
+                config.CRAWLER_MAX_NOTES_COUNT,
+            )
+            max_pages = max(
+                1,
+                (keyword_max_note_count + tieba_limit_count - 1) // tieba_limit_count,
+            )
             page = 1
-            while (
-                page - start_page + 1
-            ) * tieba_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
+            keyword_crawled_count = 0
+            while page < start_page + max_pages:
                 if page < start_page:
                     utils.logger.info(f"[BaiduTieBaCrawler.search] Skip page {page}")
                     page += 1
@@ -175,12 +180,19 @@ class TieBaCrawler(AbstractCrawler):
                     utils.logger.info(
                         f"[BaiduTieBaCrawler.search] search tieba keyword: {keyword}, page: {page}"
                     )
+                    keyword_sort = (
+                        SearchSortType.TIME_DESC
+                        if config.KEYWORD_SORT_MODES.get(keyword) == 1
+                        else SearchSortType.RELEVANCE_ORDER
+                        if keyword in config.KEYWORD_SORT_MODES
+                        else SearchSortType.TIME_DESC
+                    )
                     notes_list: List[TiebaNote] = (
                         await self.tieba_client.get_notes_by_keyword(
                             keyword=keyword,
                             page=page,
                             page_size=tieba_limit_count,
-                            sort=SearchSortType.TIME_DESC,
+                            sort=keyword_sort,
                             note_type=SearchNoteType.FIXED_THREAD,
                         )
                     )
@@ -189,12 +201,17 @@ class TieBaCrawler(AbstractCrawler):
                             f"[BaiduTieBaCrawler.search] Search note list is empty"
                         )
                         break
+                    remaining_count = keyword_max_note_count - keyword_crawled_count
+                    if remaining_count <= 0:
+                        break
+                    notes_list = notes_list[:remaining_count]
                     utils.logger.info(
                         f"[BaiduTieBaCrawler.search] Note list len: {len(notes_list)}"
                     )
                     await self.get_specified_notes(
                         note_id_list=[note_detail.note_id for note_detail in notes_list]
                     )
+                    keyword_crawled_count += len(notes_list)
 
                     # Sleep after page navigation
                     await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)

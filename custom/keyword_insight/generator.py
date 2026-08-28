@@ -20,7 +20,7 @@ class Generator:
         self.analyzer = Analyzer()
         self.save_repo = ReportRepository()
 
-    def run_one(self, keyword, use_llm=False, reference_content="", report_month=None):
+    def run_one(self, keyword, use_llm=True, reference_content="", report_month=None):
         report_month = report_month or datetime.now().strftime("%Y-%m")
         notes, comments, creators, creator_count = self.repo.load_data(keyword, report_month)
         if not notes and not comments:
@@ -37,11 +37,11 @@ class Generator:
         creator_analysis = self.analyzer.analyze_creators(creators)
         tags = self.analyzer.analyze_tags(notes)
         time_trend = self.analyzer.analyze_time_trend(notes, comments)
-        report = ReportBuilder.build(keyword, notes, comments, creators, topics, roles, concerns, questions, sentiment, engagement, geography, creator_analysis, tags, time_trend, use_llm=use_llm, reference_content=reference_content, creator_count=creator_count)
-        self.save_repo.save(keyword, report_month, notes, comments, creators, topics, roles, concerns, questions, sentiment, report, engagement, geography, creator_analysis, tags, time_trend, mode="ai" if use_llm else "template")
+        report = ReportBuilder.build(keyword, notes, comments, creators, topics, roles, concerns, questions, sentiment, engagement, geography, creator_analysis, tags, time_trend, use_llm=True, reference_content=reference_content, creator_count=creator_count)
+        self.save_repo.save(keyword, report_month, notes, comments, creators, topics, roles, concerns, questions, sentiment, report, engagement, geography, creator_analysis, tags, time_trend, mode="ai")
         print(f"done: {keyword} / {report_month}")
         return True
 
-    def run_all(self, keyword=None, use_llm=False, reference_content="", report_month=None):
+    def run_all(self, keyword=None, use_llm=True, reference_content="", report_month=None):
         for item in ([keyword] if keyword else self.repo.get_keywords()):
-            self.run_one(item, use_llm=use_llm, reference_content=reference_content, report_month=report_month)
+            self.run_one(item, use_llm=True, reference_content=reference_content, report_month=report_month)

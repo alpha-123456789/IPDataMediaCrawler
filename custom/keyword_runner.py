@@ -1,3 +1,4 @@
+import json
 import random
 import subprocess
 import time
@@ -20,7 +21,7 @@ class KeywordRunner:
             with conn.cursor() as cursor:
 
                 cursor.execute("""
-                    SELECT keyword
+                    SELECT keyword, sort_mode, filter_note_time, max_note_count
                     FROM crawler_keyword
                     WHERE status = 1
                 """)
@@ -28,7 +29,12 @@ class KeywordRunner:
                 rows = cursor.fetchall()
 
                 return [
-                    row['keyword'].strip()
+                    {
+                        "keyword": row["keyword"].strip(),
+                        "sort_mode": int(row.get("sort_mode", 0)),
+                        "filter_note_time": row.get("filter_note_time", 0),
+                        "max_note_count": row.get("max_note_count"),
+                    }
                     for row in rows
                     if row['keyword'] and row['keyword'].strip()
                 ]
@@ -74,7 +80,7 @@ class KeywordRunner:
         finally:
             conn.close()
 
-    def run_keyword(self, keyword):
+    def run_keyword(self, keyword, sort_mode, filter_note_time=0, max_note_count=None):
 
         cmd = [
             "uv",
@@ -89,6 +95,26 @@ class KeywordRunner:
         ]
 
         cmd.extend(self.config["cmd_args"])
+        cmd.extend(
+            [
+                "--keyword_sort_modes",
+                json.dumps({keyword: sort_mode}, ensure_ascii=False),
+            ]
+        )
+        if self.config["platform"] == "xhs":
+            cmd.extend(
+                [
+                    "--keyword_filter_note_times",
+                    json.dumps({keyword: filter_note_time}, ensure_ascii=False),
+                ]
+            )
+        if max_note_count is not None:
+            cmd.extend(
+                [
+                    "--keyword_max_note_counts",
+                    json.dumps({keyword: max_note_count}, ensure_ascii=False),
+                ]
+            )
 
         print("=" * 80)
         print(f"开始执行关键词: {keyword}")
@@ -109,22 +135,27 @@ class KeywordRunner:
         )
 
         need_run_keywords = [
-            keyword
-            for keyword in keywords
-            if keyword not in current_month_keywords
+            row
+            for row in keywords
+            if row["keyword"] not in current_month_keywords
         ]
 
         print(f"本次需要抓取关键词数量: {len(need_run_keywords)}")
 
         total = len(need_run_keywords)
 
-        for index, keyword in enumerate(
+        for index, keyword_row in enumerate(
                 need_run_keywords,
                 start=1):
 
             print(f"\n[{index}/{total}]")
 
-            self.run_keyword(keyword)
+            self.run_keyword(
+                keyword_row["keyword"],
+                keyword_row["sort_mode"],
+                keyword_row["filter_note_time"],
+                keyword_row["max_note_count"],
+            )
 
             if index < total:
 

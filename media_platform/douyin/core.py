@@ -47,10 +47,11 @@ from tools.crawl_dedup import (
     filter_uncrawled_note_ids,
 )
 from tools.crawl_progress import emit_keyword_completed
+from tools.keyword_date_filter import is_post_within_keyword_date_range
 from var import crawler_type_var, source_keyword_var
 
 from .client import DouYinClient
-from .field import PublishTimeType
+from .field import PublishTimeType, SearchSortType
 from .help import parse_video_info_from_url, parse_creator_info_from_url
 from .login import DouYinLogin
 
@@ -112,7 +113,11 @@ class DouYinCrawler(AbstractCrawler):
                 await self.browser_context.add_init_script(path="libs/stealth.min.js")
 
             self.context_page = await self.browser_context.new_page()
-            await self.context_page.goto(self.index_url)
+            await self.context_page.goto(
+                self.index_url,
+                wait_until="domcontentloaded",
+                timeout=60_000,
+            )
 
             self.dy_client = await self.create_douyin_client(httpx_proxy_format)
             if not await self.dy_client.pong(browser_context=self.browser_context):
@@ -144,17 +149,24 @@ class DouYinCrawler(AbstractCrawler):
     async def search(self) -> None:
         utils.logger.info("[DouYinCrawler.search] Begin search douyin keywords")
         dy_limit_count = 10  # douyin limit page fixed value
-        if config.CRAWLER_MAX_NOTES_COUNT < dy_limit_count:
-            config.CRAWLER_MAX_NOTES_COUNT = dy_limit_count
         start_page = config.START_PAGE  # start page number
         for keyword in config.KEYWORDS.split(","):
             source_keyword_var.set(keyword)
             utils.logger.info(f"[DouYinCrawler.search] Current keyword: {keyword}")
+            keyword_max_note_count = config.KEYWORD_MAX_NOTE_COUNTS.get(
+                keyword,
+                config.CRAWLER_MAX_NOTES_COUNT,
+            )
+            max_pages = max(
+                1,
+                (keyword_max_note_count + dy_limit_count - 1) // dy_limit_count,
+            )
             aweme_list: List[str] = []
+            keyword_crawled_count = 0
             page = 0
             dy_search_id = ""
             keyword_completed = True
-            while (page - start_page + 1) * dy_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
+            while page < start_page + max_pages:
                 if page < start_page:
                     utils.logger.info(f"[DouYinCrawler.search] Skip {page}")
                     page += 1
@@ -164,6 +176,11 @@ class DouYinCrawler(AbstractCrawler):
                     posts_res = await self.dy_client.search_info_by_keyword(
                         keyword=keyword,
                         offset=page * dy_limit_count - dy_limit_count,
+                        sort_type=(
+                            SearchSortType.LATEST
+                            if config.KEYWORD_SORT_MODES.get(keyword) == 1
+                            else SearchSortType.GENERAL
+                        ),
                         publish_time=PublishTimeType(config.PUBLISH_TIME_TYPE),
                         search_id=dy_search_id,
                     )
@@ -195,6 +212,13 @@ class DouYinCrawler(AbstractCrawler):
                     if keyword in aweme_info.get("desc", ""):
                         candidate_awemes.append(aweme_info)
 
+                candidate_awemes = [
+                    aweme_info
+                    for aweme_info in candidate_awemes
+                    if is_post_within_keyword_date_range(
+                        keyword, aweme_info.get("create_time")
+                    )
+                ]
                 # Filter out already-crawled notes
                 candidate_ids = [a.get("aweme_id", "") for a in candidate_awemes]
                 uncrawled_ids = set(await filter_uncrawled_note_ids("dy", candidate_ids))
@@ -208,6 +232,10 @@ class DouYinCrawler(AbstractCrawler):
                     if aweme_info.get("aweme_id", "") in uncrawled_ids
                     and aweme_info.get("aweme_id", "") not in seen_aweme_ids
                 ]
+                remaining_count = keyword_max_note_count - keyword_crawled_count
+                if remaining_count <= 0:
+                    break
+                pending_awemes = pending_awemes[:remaining_count]
                 comment_aweme_ids = {
                     aweme_info.get("aweme_id", "") for aweme_info in pending_awemes
                 }
@@ -217,6 +245,7 @@ class DouYinCrawler(AbstractCrawler):
                     seen_aweme_ids.add(aweme_id)
                     aweme_list.append(aweme_id)
                     page_aweme_list.append(aweme_id)
+                    keyword_crawled_count += 1
                     await douyin_store.update_douyin_aweme(aweme_item=aweme_info)
                     await self.get_aweme_media(aweme_item=aweme_info)
                 # Batch get new-post comments and recovery comments for this page.

@@ -52,6 +52,7 @@ from tools.crawl_dedup import (
     filter_uncrawled_note_ids,
 )
 from tools.crawl_progress import emit_keyword_completed
+from tools.keyword_date_filter import is_post_within_keyword_date_range
 from var import crawler_type_var, source_keyword_var
 
 from .client import WeiboClient
@@ -158,8 +159,6 @@ class WeiboCrawler(AbstractCrawler):
         """
         utils.logger.info("[WeiboCrawler.search] Begin search weibo keywords")
         weibo_limit_count = 10  # weibo limit page fixed value
-        if config.CRAWLER_MAX_NOTES_COUNT < weibo_limit_count:
-            config.CRAWLER_MAX_NOTES_COUNT = weibo_limit_count
         start_page = config.START_PAGE
 
         # Set the search type based on the configuration for weibo
@@ -178,22 +177,51 @@ class WeiboCrawler(AbstractCrawler):
         for keyword in config.KEYWORDS.split(","):
             source_keyword_var.set(keyword)
             utils.logger.info(f"[WeiboCrawler.search] Current search keyword: {keyword}")
+            keyword_search_type = (
+                SearchType.REAL_TIME
+                if config.KEYWORD_SORT_MODES.get(keyword) == 1
+                else SearchType.DEFAULT
+                if keyword in config.KEYWORD_SORT_MODES
+                else search_type
+            )
             page = 1
             keyword_completed = True
-            while (page - start_page + 1) * weibo_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
+            keyword_crawled_count = 0
+            keyword_max_note_count = config.KEYWORD_MAX_NOTE_COUNTS.get(
+                keyword,
+                config.CRAWLER_MAX_NOTES_COUNT,
+            )
+            max_pages = max(
+                1,
+                (keyword_max_note_count + weibo_limit_count - 1) // weibo_limit_count,
+            )
+            while page < start_page + max_pages:
                 if page < start_page:
                     utils.logger.info(f"[WeiboCrawler.search] Skip page: {page}")
                     page += 1
                     continue
                 utils.logger.info(f"[WeiboCrawler.search] search weibo keyword: {keyword}, page: {page}")
                 try:
-                    search_res = await self.wb_client.get_note_by_keyword(keyword=keyword, page=page, search_type=search_type)
+                    search_res = await self.wb_client.get_note_by_keyword(
+                        keyword=keyword,
+                        page=page,
+                        search_type=keyword_search_type,
+                    )
                 except httpx.RequestError as e:
                     keyword_completed = False
                     utils.logger.info(f"[WeiboCrawler.search] 关键词 '{keyword}' 第 {page} 页无内容，停止翻页: {e}")
                     break
                 note_id_list: List[str] = []
                 note_list = filter_search_result_card(search_res.get("cards"))
+                note_list = [
+                    note_item
+                    for note_item in note_list
+                    if note_item
+                    and is_post_within_keyword_date_range(
+                        keyword,
+                        (note_item.get("mblog") or {}).get("created_at"),
+                    )
+                ]
 
                 # Filter out already-crawled notes BEFORE expensive full-text API calls
                 candidate_ids = [
@@ -208,6 +236,10 @@ class WeiboCrawler(AbstractCrawler):
                     n for n in note_list
                     if n and n.get("mblog") and str(n.get("mblog", {}).get("id", "")) in uncrawled_ids
                 ]
+                remaining_count = keyword_max_note_count - keyword_crawled_count
+                if remaining_count <= 0:
+                    break
+                note_list = note_list[:remaining_count]
                 comment_note_ids = {
                     str(note_item.get("mblog", {}).get("id", ""))
                     for note_item in note_list
@@ -222,6 +254,7 @@ class WeiboCrawler(AbstractCrawler):
                             if str(mblog.get("id")) in comment_note_ids:
                                 note_id_list.append(mblog.get("id"))
                             await weibo_store.update_weibo_note(note_item)
+                            keyword_crawled_count += 1
                             await self.get_note_images(mblog)
                         else:
                             utils.logger.info(

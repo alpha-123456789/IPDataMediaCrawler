@@ -50,11 +50,34 @@ from tools.crawl_dedup import (
     filter_uncrawled_note_ids,
 )
 from tools.crawl_progress import emit_keyword_completed
+from tools.keyword_date_filter import (
+    extract_publication_time,
+    is_post_within_keyword_date_range,
+)
 from .client import XiaoHongShuClient
 from .exception import CaptchaError, NoteNotFoundError
 from .field import SearchSortType
 from .help import parse_note_info_from_note_url, parse_creator_info_from_url, get_search_id
 from .login import XiaoHongShuLogin
+
+
+def _get_keyword_sort_type(keyword: str) -> SearchSortType:
+    configured_mode = config.KEYWORD_SORT_MODES.get(keyword)
+    if configured_mode is not None:
+        return (
+            SearchSortType.LATEST
+            if int(configured_mode) == 1
+            else SearchSortType.GENERAL
+        )
+    return (
+        SearchSortType(config.SORT_TYPE)
+        if config.SORT_TYPE != ""
+        else SearchSortType.GENERAL
+    )
+
+
+def _get_keyword_filter_note_time(keyword: str) -> str:
+    return config.KEYWORD_FILTER_NOTE_TIMES.get(keyword, "不限")
 
 
 class XiaoHongShuCrawler(AbstractCrawler):
@@ -160,16 +183,23 @@ class XiaoHongShuCrawler(AbstractCrawler):
         """Search for notes and retrieve their comment information."""
         utils.logger.info("[XiaoHongShuCrawler.search] Begin search Xiaohongshu keywords")
         xhs_limit_count = 20  # Xiaohongshu limit page fixed value
-        if config.CRAWLER_MAX_NOTES_COUNT < xhs_limit_count:
-            config.CRAWLER_MAX_NOTES_COUNT = xhs_limit_count
         start_page = config.START_PAGE
         for keyword in config.KEYWORDS.split(","):
             source_keyword_var.set(keyword)
             utils.logger.info(f"[XiaoHongShuCrawler.search] Current search keyword: {keyword}")
+            keyword_max_note_count = config.KEYWORD_MAX_NOTE_COUNTS.get(
+                keyword,
+                config.CRAWLER_MAX_NOTES_COUNT,
+            )
+            max_pages = max(
+                1,
+                (keyword_max_note_count + xhs_limit_count - 1) // xhs_limit_count,
+            )
+            keyword_crawled_count = 0
             page = 1
             search_id = get_search_id()
             keyword_completed = True
-            while (page - start_page + 1) * xhs_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
+            while page < start_page + max_pages:
                 if page < start_page:
                     utils.logger.info(f"[XiaoHongShuCrawler.search] Skip page {page}")
                     page += 1
@@ -183,18 +213,31 @@ class XiaoHongShuCrawler(AbstractCrawler):
                         keyword=keyword,
                         search_id=search_id,
                         page=page,
-                        sort=(SearchSortType(config.SORT_TYPE) if config.SORT_TYPE != "" else SearchSortType.GENERAL),
+                        sort=_get_keyword_sort_type(keyword),
+                        filter_note_time=_get_keyword_filter_note_time(keyword),
                     )
                     utils.logger.info(f"[XiaoHongShuCrawler.search] Search notes response: {notes_res}")
-                    if not notes_res or not notes_res.get("has_more", False):
+                    if not notes_res:
                         utils.logger.info("[XiaoHongShuCrawler.search] No more content!")
                         break
+                    has_more = notes_res.get("has_more", False)
 
                     # Filter out already-crawled notes before fetching details
                     candidate_items = [
                         post_item for post_item in notes_res.get("items", {})
                         if post_item.get("model_type") not in ("rec_query", "hot_query")
                     ]
+                    candidate_items = [
+                        post_item
+                        for post_item in candidate_items
+                        if is_post_within_keyword_date_range(
+                            keyword, extract_publication_time(post_item)
+                        )
+                    ]
+                    remaining_count = keyword_max_note_count - keyword_crawled_count
+                    if remaining_count <= 0:
+                        break
+                    candidate_items = candidate_items[:remaining_count]
                     candidate_ids = [item.get("id") for item in candidate_items if item.get("id")]
                     uncrawled_ids = set(await filter_uncrawled_note_ids("xhs", candidate_ids))
                     recovery_note_ids = set(
@@ -214,8 +257,16 @@ class XiaoHongShuCrawler(AbstractCrawler):
                                 [item.get("id") for item in recovery_items],
                                 [item.get("xsec_token") for item in recovery_items],
                             )
+                        elif not candidate_items:
+                            utils.logger.info(
+                                "[XiaoHongShuCrawler.search] No notes on this page "
+                                "match the keyword date range, skipping"
+                            )
                         else:
                             utils.logger.info("[XiaoHongShuCrawler.search] All notes on this page already crawled, skipping")
+                        if not has_more:
+                            utils.logger.info("[XiaoHongShuCrawler.search] No more content!")
+                            break
                         page += 1
                         continue
                     comment_note_ids = {item.get("id") for item in filtered_items}
@@ -241,6 +292,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
 
                         if keyword in note_detail.get("title", "") or keyword in note_detail.get("desc", ""):
                             self.success += 1
+                            keyword_crawled_count += 1
                             await xhs_store.update_xhs_note(note_detail)
                             await self.get_notice_media(note_detail)
                             if str(note_detail.get("note_id")) in comment_note_ids:
@@ -256,6 +308,9 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     # Sleep after each page navigation
                     await asyncio.sleep(config.XHS_CRAWLER_SLEEP_SEC)
                     utils.logger.info(f"[XiaoHongShuCrawler.search] Sleeping for {config.XHS_CRAWLER_SLEEP_SEC} seconds after page {page-1}")
+                    if not has_more:
+                        utils.logger.info("[XiaoHongShuCrawler.search] No more content!")
+                        break
                 except CaptchaError as ex:
                     if not ex.redirect_url:
                         query = urlencode(

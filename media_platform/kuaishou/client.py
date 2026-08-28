@@ -337,6 +337,11 @@ class KuaiShouClient(AbstractApiClient, ProxyRefreshMixin):
         }
         return await self.post("", post_data)
 
+    async def get_video_by_creater_v2(self, user_id: str, pcursor: str = "") -> Dict:
+        """Get a creator's works through the signed REST endpoint."""
+        post_data = {"user_id": user_id, "pcursor": pcursor, "page": "profile"}
+        return await self.request_rest_v2_signed("/rest/v/profile/feed", post_data)
+
     async def get_video_all_comments(
         self,
         photo_id: str,
@@ -453,20 +458,29 @@ class KuaiShouClient(AbstractApiClient, ProxyRefreshMixin):
         pcursor = ""
 
         while pcursor != "no_more":
-            videos_res = await self.get_video_by_creater(user_id, pcursor)
+            videos_res = await self.get_video_by_creater_v2(user_id, pcursor)
             if not videos_res:
                 utils.logger.error(
                     f"[KuaiShouClient.get_all_videos_by_creator] The current creator may have been banned by ks, so they cannot access the data."
                 )
                 break
 
-            vision_profile_photo_list = videos_res.get("visionProfilePhotoList", {})
-            pcursor = vision_profile_photo_list.get("pcursor", "")
+            result_code = videos_res.get("result")
+            if result_code != 1:
+                utils.logger.error(
+                    f"[KuaiShouClient.get_all_videos_by_creator] ks api returned business error "
+                    f"(result: {result_code}), stop pagination for user_id: {user_id}"
+                )
+                break
 
-            videos = vision_profile_photo_list.get("feeds", [])
+            pcursor = videos_res.get("pcursor", "")
+            videos = videos_res.get("feeds", [])
             utils.logger.info(
                 f"[KuaiShouClient.get_all_videos_by_creator] got user_id:{user_id} videos len : {len(videos)}"
             )
+
+            if not videos:
+                break
 
             if callback:
                 await callback(videos)

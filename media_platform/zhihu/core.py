@@ -45,6 +45,7 @@ from tools.cdp_browser import CDPBrowserManager
 from var import crawler_type_var, source_keyword_var
 
 from .client import ZhiHuClient
+from .field import SearchSort
 from .help import ZhihuExtractor, judge_zhihu_url
 from .login import ZhiHuLogin
 
@@ -151,18 +152,23 @@ class ZhihuCrawler(AbstractCrawler):
         """Search for notes and retrieve their comment information."""
         utils.logger.info("[ZhihuCrawler.search] Begin search zhihu keywords")
         zhihu_limit_count = 20  # zhihu limit page fixed value
-        if config.CRAWLER_MAX_NOTES_COUNT < zhihu_limit_count:
-            config.CRAWLER_MAX_NOTES_COUNT = zhihu_limit_count
         start_page = config.START_PAGE
         for keyword in config.KEYWORDS.split(","):
             source_keyword_var.set(keyword)
             utils.logger.info(
                 f"[ZhihuCrawler.search] Current search keyword: {keyword}"
             )
+            keyword_max_note_count = config.KEYWORD_MAX_NOTE_COUNTS.get(
+                keyword,
+                config.CRAWLER_MAX_NOTES_COUNT,
+            )
+            max_pages = max(
+                1,
+                (keyword_max_note_count + zhihu_limit_count - 1) // zhihu_limit_count,
+            )
             page = 1
-            while (
-                page - start_page + 1
-            ) * zhihu_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
+            keyword_crawled_count = 0
+            while page < start_page + max_pages:
                 if page < start_page:
                     utils.logger.info(f"[ZhihuCrawler.search] Skip page {page}")
                     page += 1
@@ -176,6 +182,11 @@ class ZhihuCrawler(AbstractCrawler):
                         await self.zhihu_client.get_note_by_keyword(
                             keyword=keyword,
                             page=page,
+                            sort=(
+                                SearchSort.CREATE_TIME
+                                if config.KEYWORD_SORT_MODES.get(keyword) == 1
+                                else SearchSort.DEFAULT
+                            ),
                         )
                     )
                     utils.logger.info(
@@ -184,6 +195,10 @@ class ZhihuCrawler(AbstractCrawler):
                     if not content_list:
                         utils.logger.info("No more content!")
                         break
+                    remaining_count = keyword_max_note_count - keyword_crawled_count
+                    if remaining_count <= 0:
+                        break
+                    content_list = content_list[:remaining_count]
 
                     # Sleep after page navigation
                     await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
@@ -192,6 +207,7 @@ class ZhihuCrawler(AbstractCrawler):
                     page += 1
                     for content in content_list:
                         await zhihu_store.update_zhihu_content(content)
+                        keyword_crawled_count += 1
 
                     await self.batch_get_content_comments(content_list)
                 except httpx.RequestError as ex:

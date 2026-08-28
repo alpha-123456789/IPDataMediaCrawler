@@ -97,6 +97,58 @@ async def test_kuaishou_search_uses_signed_rest_endpoint():
 
 
 @pytest.mark.asyncio
+async def test_kuaishou_creator_feed_uses_signed_rest_endpoint():
+    client = KuaiShouClient(
+        headers={},
+        playwright_page=AsyncMock(),
+        cookie_dict={},
+    )
+    client.request_rest_v2_signed = AsyncMock(
+        return_value={"result": 1, "feeds": []}
+    )
+
+    result = await client.get_video_by_creater_v2("creator-1", "cursor-1")
+
+    assert result == {"result": 1, "feeds": []}
+    client.request_rest_v2_signed.assert_awaited_once_with(
+        "/rest/v/profile/feed",
+        {
+            "user_id": "creator-1",
+            "pcursor": "cursor-1",
+            "page": "profile",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_kuaishou_creator_pagination_reads_rest_response(monkeypatch):
+    client = KuaiShouClient(
+        headers={},
+        playwright_page=AsyncMock(),
+        cookie_dict={},
+    )
+    client.get_video_by_creater_v2 = AsyncMock(
+        return_value={
+            "result": 1,
+            "pcursor": "no_more",
+            "feeds": [{"id": "video-1"}],
+        }
+    )
+    callback = AsyncMock()
+    monkeypatch.setattr("media_platform.kuaishou.client.asyncio.sleep", AsyncMock())
+
+    videos = await client.get_all_videos_by_creator(
+        "creator-1",
+        crawl_interval=0,
+        callback=callback,
+    )
+
+    assert videos == [{"id": "video-1"}]
+    client.get_video_by_creater_v2.assert_awaited_once_with("creator-1", "")
+    callback.assert_awaited_once_with([{"id": "video-1"}])
+
+
+@pytest.mark.asyncio
 async def test_kuaishou_signed_rest_request_includes_fresh_signature(monkeypatch):
     signature = AsyncMock(return_value="signed-value")
     monkeypatch.setattr(

@@ -128,8 +128,7 @@ class BiliDbStoreImplement(AbstractStore):
         Args:
             content_item: content item dict
         """
-        video_id = int(content_item.get("video_id"))
-        content_item["video_id"] = video_id
+        video_id = content_item.get("video_id")
         content_item["user_id"] = int(content_item.get("user_id", 0) or 0)
         content_item["liked_count"] = int(content_item.get("liked_count", 0) or 0)
         content_item["create_time"] = int(content_item.get("create_time", 0) or 0)
@@ -155,9 +154,7 @@ class BiliDbStoreImplement(AbstractStore):
         Args:
             comment_item: comment item dict
         """
-        comment_id = int(comment_item.get("comment_id"))
-        comment_item["comment_id"] = comment_id
-        comment_item["video_id"] = int(comment_item.get("video_id", 0) or 0)
+        comment_id = comment_item.get("comment_id")
         comment_item["create_time"] = int(comment_item.get("create_time", 0) or 0)
         comment_item["like_count"] = str(comment_item.get("like_count", "0"))
         comment_item["sub_comment_count"] = str(comment_item.get("sub_comment_count", "0"))
@@ -240,8 +237,7 @@ class BiliDbStoreImplement(AbstractStore):
         Args:
             dynamic_item: dynamic item dict
         """
-        dynamic_id = int(dynamic_item.get("dynamic_id"))
-        dynamic_item["dynamic_id"] = dynamic_id
+        dynamic_id = dynamic_item.get("dynamic_id")
 
         async with get_session() as session:
             result = await session.execute(select(BilibiliUpDynamic).where(BilibiliUpDynamic.dynamic_id == dynamic_id))

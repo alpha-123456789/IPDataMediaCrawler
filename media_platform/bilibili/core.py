@@ -55,6 +55,10 @@ from tools.crawl_dedup import (
     filter_uncrawled_note_ids,
 )
 from tools.crawl_progress import emit_keyword_completed
+from tools.keyword_date_filter import (
+    get_keyword_date_range,
+    is_post_within_keyword_date_range,
+)
 from var import crawler_type_var, source_keyword_var
 
 from .client import BilibiliClient
@@ -62,6 +66,14 @@ from .exception import DataFetchError
 from .field import SearchOrderType
 from .help import parse_video_info_from_url, parse_creator_info_from_url
 from .login import BilibiliLogin
+
+
+def _get_keyword_search_order(keyword: str) -> SearchOrderType:
+    return (
+        SearchOrderType.LAST_PUBLISH
+        if config.KEYWORD_SORT_MODES.get(keyword) == 1
+        else SearchOrderType.DEFAULT
+    )
 
 
 class BilibiliCrawler(AbstractCrawler):
@@ -199,15 +211,22 @@ class BilibiliCrawler(AbstractCrawler):
         """
         utils.logger.info("[BilibiliCrawler.search_by_keywords] Begin search bilibli keywords")
         bili_limit_count = 20  # bilibili limit page fixed value
-        if config.CRAWLER_MAX_NOTES_COUNT < bili_limit_count:
-            config.CRAWLER_MAX_NOTES_COUNT = bili_limit_count
         start_page = config.START_PAGE  # start page number
         for keyword in config.KEYWORDS.split(","):
             source_keyword_var.set(keyword)
             utils.logger.info(f"[BilibiliCrawler.search_by_keywords] Current search keyword: {keyword}")
+            keyword_max_note_count = config.KEYWORD_MAX_NOTE_COUNTS.get(
+                keyword,
+                config.CRAWLER_MAX_NOTES_COUNT,
+            )
+            max_pages = max(
+                1,
+                (keyword_max_note_count + bili_limit_count - 1) // bili_limit_count,
+            )
             page = 1
+            keyword_crawled_count = 0
             keyword_completed = True
-            while (page - start_page + 1) * bili_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
+            while page < start_page + max_pages:
                 if page < start_page:
                     utils.logger.info(f"[BilibiliCrawler.search_by_keywords] Skip page: {page}")
                     page += 1
@@ -220,7 +239,7 @@ class BilibiliCrawler(AbstractCrawler):
                         keyword=keyword,
                         page=page,
                         page_size=bili_limit_count,
-                        order=SearchOrderType.DEFAULT,
+                        order=_get_keyword_search_order(keyword),
                         pubtime_begin_s=0,  # Publish date start timestamp
                         pubtime_end_s=0,  # Publish date end timestamp
                     )
@@ -237,6 +256,17 @@ class BilibiliCrawler(AbstractCrawler):
                     utils.logger.info(f"[BilibiliCrawler.search_by_keywords] No more videos for '{keyword}', moving to next keyword.")
                     break
 
+                video_list = [
+                    video_item
+                    for video_item in video_list
+                    if is_post_within_keyword_date_range(
+                        keyword, video_item.get("pubdate")
+                    )
+                ]
+                remaining_count = keyword_max_note_count - keyword_crawled_count
+                if remaining_count <= 0:
+                    break
+                video_list = video_list[:remaining_count]
                 # Filter out already-crawled videos before fetching details
                 candidate_aids = [str(video_item.get("aid", "")) for video_item in video_list]
                 uncrawled_aids = set(await filter_uncrawled_note_ids("bili", candidate_aids))
@@ -276,6 +306,7 @@ class BilibiliCrawler(AbstractCrawler):
                         await bilibili_store.update_bilibili_video(video_item)
                         await bilibili_store.update_up_info(video_item)
                         await self.get_bilibili_video(video_item, semaphore)
+                        keyword_crawled_count += 1
                     else:
                         utils.logger.info(
                             f"[BilibiliCrawler.search_by_keywords] Title And Content No Keyword! https://www.bilibili.com/video/av{aid}")
@@ -302,16 +333,27 @@ class BilibiliCrawler(AbstractCrawler):
         for keyword in config.KEYWORDS.split(","):
             source_keyword_var.set(keyword)
             utils.logger.info(f"[BilibiliCrawler.search_by_keywords_in_time_range] Current search keyword: {keyword}")
+            keyword_max_note_count = config.KEYWORD_MAX_NOTE_COUNTS.get(
+                keyword,
+                config.CRAWLER_MAX_NOTES_COUNT,
+            )
             total_notes_crawled_for_keyword = 0
             keyword_completed = True
+            keyword_date_range = get_keyword_date_range(keyword)
+            range_start = (
+                keyword_date_range[0].isoformat()
+                if keyword_date_range and keyword_date_range[0]
+                else config.START_DAY
+            )
+            range_end = (
+                keyword_date_range[1].isoformat()
+                if keyword_date_range and keyword_date_range[1]
+                else config.END_DAY
+            )
 
-            for day in pd.date_range(start=config.START_DAY, end=config.END_DAY, freq="D"):
-                if (daily_limit and total_notes_crawled_for_keyword >= config.CRAWLER_MAX_NOTES_COUNT):
-                    utils.logger.info(f"[BilibiliCrawler.search] Reached CRAWLER_MAX_NOTES_COUNT limit for keyword '{keyword}', skipping remaining days.")
-                    break
-
-                if (not daily_limit and total_notes_crawled_for_keyword >= config.CRAWLER_MAX_NOTES_COUNT):
-                    utils.logger.info(f"[BilibiliCrawler.search] Reached CRAWLER_MAX_NOTES_COUNT limit for keyword '{keyword}', skipping remaining days.")
+            for day in pd.date_range(start=range_start, end=range_end, freq="D"):
+                if total_notes_crawled_for_keyword >= keyword_max_note_count:
+                    utils.logger.info(f"[BilibiliCrawler.search] Reached max note count limit for keyword '{keyword}', skipping remaining days.")
                     break
 
                 pubtime_begin_s, pubtime_end_s = await self.get_pubtime_datetime(start=day.strftime("%Y-%m-%d"), end=day.strftime("%Y-%m-%d"))
@@ -322,10 +364,8 @@ class BilibiliCrawler(AbstractCrawler):
                     if notes_count_this_day >= config.MAX_NOTES_PER_DAY:
                         utils.logger.info(f"[BilibiliCrawler.search] Reached MAX_NOTES_PER_DAY limit for {day.ctime()}.")
                         break
-                    if (daily_limit and total_notes_crawled_for_keyword >= config.CRAWLER_MAX_NOTES_COUNT):
-                        utils.logger.info(f"[BilibiliCrawler.search] Reached CRAWLER_MAX_NOTES_COUNT limit for keyword '{keyword}'.")
-                        break
-                    if (not daily_limit and total_notes_crawled_for_keyword >= config.CRAWLER_MAX_NOTES_COUNT):
+                    if total_notes_crawled_for_keyword >= keyword_max_note_count:
+                        utils.logger.info(f"[BilibiliCrawler.search] Reached max note count limit for keyword '{keyword}'.")
                         break
 
                     try:
@@ -335,7 +375,7 @@ class BilibiliCrawler(AbstractCrawler):
                             keyword=keyword,
                             page=page,
                             page_size=bili_limit_count,
-                            order=SearchOrderType.DEFAULT,
+                            order=_get_keyword_search_order(keyword),
                             pubtime_begin_s=pubtime_begin_s,
                             pubtime_end_s=pubtime_end_s,
                         )
@@ -345,6 +385,20 @@ class BilibiliCrawler(AbstractCrawler):
                             utils.logger.info(f"[BilibiliCrawler.search] No more videos for '{keyword}' on {day.ctime()}, moving to next day.")
                             break
 
+                        video_list = [
+                            video_item
+                            for video_item in video_list
+                            if is_post_within_keyword_date_range(
+                                keyword, video_item.get("pubdate")
+                            )
+                        ]
+                        remaining_count = min(
+                            keyword_max_note_count - total_notes_crawled_for_keyword,
+                            config.MAX_NOTES_PER_DAY - notes_count_this_day,
+                        )
+                        if remaining_count <= 0:
+                            break
+                        video_list = video_list[:remaining_count]
                         # Filter out already-crawled videos before fetching details
                         candidate_aids = [str(video_item.get("aid", "")) for video_item in video_list]
                         uncrawled_aids = set(await filter_uncrawled_note_ids("bili", candidate_aids))
@@ -370,9 +424,7 @@ class BilibiliCrawler(AbstractCrawler):
 
                         for video_item in video_items:
                             if video_item:
-                                if (daily_limit and total_notes_crawled_for_keyword >= config.CRAWLER_MAX_NOTES_COUNT):
-                                    break
-                                if (not daily_limit and total_notes_crawled_for_keyword >= config.CRAWLER_MAX_NOTES_COUNT):
+                                if total_notes_crawled_for_keyword >= keyword_max_note_count:
                                     break
                                 if notes_count_this_day >= config.MAX_NOTES_PER_DAY:
                                     break

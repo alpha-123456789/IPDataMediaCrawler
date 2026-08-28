@@ -5,12 +5,9 @@ from custom.keyword_insight.generator import Generator
 if __name__ == "__main__":
     # 用法：
     #   uv run .\custom\keyword_insight\run.py 猴子警长
-    #   uv run .\custom\keyword_insight\run.py 猴子警长 --llm
-    #   uv run .\custom\keyword_insight\run.py 猴子警长 --llm --ref reference.txt
+    #   uv run .\custom\keyword_insight\run.py 猴子警长 --ref reference.txt
 
     args = sys.argv[1:]
-    use_llm = "--llm" in args
-
     # 加载参考内容
     reference_content = ""
     if "--ref" in args:
@@ -38,4 +35,4 @@ if __name__ == "__main__":
 
     keyword = keywords_args[0] if keywords_args else None
 
-    Generator().run_all(keyword, use_llm=use_llm, reference_content=reference_content)
+    Generator().run_all(keyword, use_llm=True, reference_content=reference_content)
