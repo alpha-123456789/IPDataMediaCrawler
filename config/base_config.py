@@ -79,6 +79,9 @@ CDP_HEADLESS = False
 # 浏览器启动超时时间（秒）
 BROWSER_LAUNCH_TIMEOUT = 60
 
+# 浏览器页面导航超时时间（毫秒）
+BROWSER_NAVIGATION_TIMEOUT = 60_000
+
 # 是否连接用户已打开的浏览器，而不是启动新的浏览器
 # 开启后，程序会连接一个已经启用了远程调试的浏览器
 # 用户需要在 Chrome 中开启远程调试：chrome://inspect/#remote-debugging

@@ -108,7 +108,7 @@ class KuaishouCrawler(AbstractCrawler):
 
             self.context_page = await self.browser_context.new_page()
             await self.context_page.add_init_script(KS_SIGN_CAPTURE_SCRIPT)
-            await self.context_page.goto(f"{self.index_url}?isHome=1")
+            await self._goto_homepage()
 
             # Create a client to interact with the kuaishou website.
             self.ks_client = await self.create_ks_client(httpx_proxy_format)
@@ -142,6 +142,17 @@ class KuaishouCrawler(AbstractCrawler):
                 pass
 
             utils.logger.info("[KuaishouCrawler.start] Kuaishou Crawler finished ...")
+
+    async def _goto_homepage(self) -> None:
+        """Open the homepage without waiting for every long-lived resource."""
+        self.context_page.set_default_navigation_timeout(
+            config.BROWSER_NAVIGATION_TIMEOUT
+        )
+        await self.context_page.goto(
+            f"{self.index_url}?isHome=1",
+            wait_until="domcontentloaded",
+            timeout=config.BROWSER_NAVIGATION_TIMEOUT,
+        )
 
     async def search(self):
         utils.logger.info("[KuaishouCrawler.search] Begin search kuaishou keywords")
