@@ -11,10 +11,13 @@ import json
 import os
 import subprocess
 import sys
+import uuid
 from datetime import date, datetime
 from pathlib import Path
+from typing import Optional
 
 from custom.db import get_conn
+from custom.keyword_insight.notify_client import send_keyword_task_completion
 from tools.cdp_guard import is_cdp_browser_running
 from tools.crawl_progress import (
     PROGRESS_ENV,
@@ -94,7 +97,7 @@ def get_realtime_keywords_with_flag() -> list:
         with conn.cursor() as cursor:
             cursor.execute("""
                 SELECT keyword, is_regular, start_date, end_date,
-                       sort_mode, filter_note_time, max_note_count
+                       sort_mode, filter_note_time, max_note_count, modify_user_id
                 FROM crawler_keyword
                 WHERE status = 1 AND is_realtime = 1
             """)
@@ -108,6 +111,7 @@ def get_realtime_keywords_with_flag() -> list:
                     "sort_mode": row.get("sort_mode", 0),
                     "filter_note_time": row.get("filter_note_time", 0),
                     "max_note_count": row.get("max_note_count"),
+                    "modify_user_id": row.get("modify_user_id"),
                 }
                 for row in rows
                 if row['keyword'] and row['keyword'].strip()
@@ -267,10 +271,10 @@ def run_crawl(
     platform: str,
     keywords: list,
     on_keyword_completed=None,
-    keyword_date_ranges: dict | None = None,
-    keyword_sort_modes: dict | None = None,
-    keyword_filter_note_times: dict | None = None,
-    keyword_max_note_counts: dict | None = None,
+    keyword_date_ranges: Optional[dict] = None,
+    keyword_sort_modes: Optional[dict] = None,
+    keyword_filter_note_times: Optional[dict] = None,
+    keyword_max_note_counts: Optional[dict] = None,
 ) -> bool:
     """Run a single crawl session for a platform with multiple keywords (comma-separated)."""
     cmd = [
@@ -355,6 +359,42 @@ def ensure_cdp_browser_idle(mode_label: str) -> bool:
     return True
 
 
+def build_realtime_notification_groups(
+    keyword_rows: list,
+    successful_crawls: set,
+    failed_crawls: set,
+) -> dict:
+    """按关键词操作人拆分实时抓取结果，避免跨用户发送任务明细。"""
+    keyword_owners = {
+        row["keyword"]: str(row.get("modify_user_id") or "").strip()
+        for row in keyword_rows
+        if row.get("keyword")
+    }
+    groups = {}
+
+    for result_type, crawl_results in (
+        ("success_items", successful_crawls),
+        ("failed_items", failed_crawls),
+    ):
+        for platform, keyword in sorted(crawl_results):
+            modify_user_id = keyword_owners.get(keyword, "")
+            if not modify_user_id:
+                print(
+                    f"[通知] 关键词 '{keyword}' 缺少 modify_user_id，跳过实时完成通知",
+                    flush=True,
+                )
+                continue
+
+            group = groups.setdefault(
+                modify_user_id,
+                {"platforms": set(), "success_items": [], "failed_items": []},
+            )
+            group["platforms"].add(platform)
+            group[result_type].append(f"{platform} / {keyword}")
+
+    return groups
+
+
 def run_realtime_check(platforms: list):
     """检查并执行实时关键词抓取。"""
     keyword_rows = get_realtime_keywords_with_flag()
@@ -377,6 +417,7 @@ def run_realtime_check(platforms: list):
         print(f"[REALTIME]   临时关键词(is_regular=0): {temp_keywords}")
 
     successful_crawls = set()
+    failed_crawls = set()
 
     for platform in platforms:
         for kw in keywords:
@@ -397,13 +438,27 @@ def run_realtime_check(platforms: list):
                 crawl_kwargs["keyword_max_note_counts"] = {
                     kw: keyword_max_note_counts[kw]
                 }
-            ok = run_crawl(platform, [kw], **crawl_kwargs)
-            if ok:
+            completed_keywords = set()
+            ok = run_crawl(
+                platform,
+                [kw],
+                on_keyword_completed=completed_keywords.add,
+                **crawl_kwargs,
+            )
+            crawl_succeeded = ok and kw in completed_keywords
+            if crawl_succeeded:
                 print(f"[REALTIME DONE] {platform} / {kw}")
                 successful_crawls.add((platform, kw))
                 update_remark([kw], "实时抓取完成")
             else:
+                if ok:
+                    print(
+                        f"[REALTIME] {platform} / {kw} 进程退出码为 0，"
+                        "但未收到关键词完成事件，按抓取失败处理",
+                        flush=True,
+                    )
                 print(f"[REALTIME FAIL] {platform} / {kw}")
+                failed_crawls.add((platform, kw))
                 update_remark([kw], "实时抓取失败，等待重新抓取")
 
     # 只有本次全部平台都成功，才关闭对应关键词的实时任务。
@@ -428,6 +483,21 @@ def run_realtime_check(platforms: list):
     disable_temp_keywords(success_temp_keywords)
     if success_temp_keywords:
         print(f"[REALTIME] 已将临时关键词 status 置为 0: {success_temp_keywords}")
+
+    notification_id = uuid.uuid4()
+    for modify_user_id, result in build_realtime_notification_groups(
+        keyword_rows, successful_crawls, failed_crawls
+    ).items():
+        send_keyword_task_completion(
+            {
+                "kind": "realtime",
+                "dedupe_key": f"realtime-{notification_id}-{modify_user_id}",
+                "modify_user_id": modify_user_id,
+                "platforms": sorted(result["platforms"]),
+                "success_items": result["success_items"],
+                "failed_items": result["failed_items"],
+            }
+        )
 
 
 def run_regular_check(platforms: list, keyword_rows: list) -> dict:

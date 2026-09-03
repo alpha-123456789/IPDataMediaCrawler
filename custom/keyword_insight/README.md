@@ -81,6 +81,20 @@ uv run -m custom.keyword_insight.custom_report `
 
 执行器会持续运行，关闭窗口或按 `Ctrl+C` 即可停止。任务失败时会更新 `keyword_report_task.status=3` 和 `error_message`；没有查到符合条件的帖子同样会标记为失败，不会产生空报告。
 
+任务完成后，执行器会回调本机后台接口发送钉钉通知：
+
+```text
+http://localhost:5000/MultiDataViewManage/KeywordTaskNotify/Completion
+```
+
+请在项目根目录 `.env` 中配置与 Web 端相同的 token：
+
+```env
+KEYWORD_NOTIFY_TOKEN=与后台 KEYWORD_NOTIFY_TOKEN 相同的随机密钥
+```
+
+未配置 token 或通知发送失败时，不影响抓取和报告任务本身。
+
 ## 可用关键词
 
 关键词来源于 MySQL 数据库 `crawler_keyword` 表（`status=1`），以下是 `config.py` 中预定义的 IP 系列及其关键词：

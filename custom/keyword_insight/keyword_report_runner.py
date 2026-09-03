@@ -12,6 +12,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from custom.db import get_conn
+from custom.keyword_insight.notify_client import get_notify_url, send_keyword_task_completion
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
@@ -109,7 +110,8 @@ def claim_task():
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, report_name, prompt, source_keyword, start_date, end_date, platform, post_ids
+                SELECT id, report_name, prompt, source_keyword, start_date, end_date,
+                       platform, post_ids, modify_user_id
                 FROM keyword_report_task
                 WHERE status = 0
                 ORDER BY id ASC
@@ -169,7 +171,9 @@ def complete_task(task_id, success, execute_log="", error_message=""):
                     task_id,
                 ),
             )
+        updated = cur.rowcount == 1
         conn.commit()
+        return updated
     except Exception:
         conn.rollback()
         raise
@@ -249,7 +253,8 @@ def main():
         validate_settings()
         print(
             f"关键词报告本地执行器已启动：{CLIENT_NAME}，"
-            f"每 {POLL_SECONDS} 秒检查一次任务表，启用大模型"
+            f"每 {POLL_SECONDS} 秒检查一次任务表，启用大模型；"
+            f"通知回调地址：{get_notify_url()}"
         , flush=True)
         while True:
             try:
@@ -261,7 +266,20 @@ def main():
                 task_id = task["id"]
                 try:
                     execute_log = run_task(task, use_llm=True)
-                    complete_task(task_id, True, execute_log=execute_log)
+                    completed = complete_task(task_id, True, execute_log=execute_log)
+                    if completed:
+                        send_keyword_task_completion(
+                            {
+                                "kind": "report",
+                                "dedupe_key": f"report-{task_id}",
+                                "task_id": task_id,
+                                "modify_user_id": task["modify_user_id"],
+                                "report_name": task["report_name"],
+                                "source_keyword": task["source_keyword"],
+                                "platform": task["platform"],
+                                "executor_name": CLIENT_NAME,
+                            }
+                        )
                 except Exception as exc:
                     error_message = str(exc)
                     print(f"[任务 {task_id}] 执行失败：{error_message}", file=sys.stderr, flush=True)

@@ -201,9 +201,10 @@ def test_realtime_crawl_ignores_current_month_history(monkeypatch, tmp_path):
 
     calls = []
 
-    def fake_run_crawl(platform, keywords, **kwargs):
+    def fake_run_crawl(platform, keywords, on_keyword_completed, **kwargs):
         calls.append((platform, keywords))
         assert kwargs["keyword_sort_modes"] == {"alpha": 0}
+        on_keyword_completed("alpha")
         return True
 
     monkeypatch.setattr(crawl_all_keywords, "run_crawl", fake_run_crawl)
@@ -239,7 +240,11 @@ def test_realtime_temp_keyword_requires_all_platforms_in_current_run(monkeypatch
     monkeypatch.setattr(
         crawl_all_keywords,
         "run_crawl",
-        lambda platform, keywords, **kwargs: platform == "dy",
+        lambda platform, keywords, on_keyword_completed, **kwargs: (
+            on_keyword_completed("alpha") or True
+            if platform == "dy"
+            else False
+        ),
     )
 
     crawl_all_keywords.run_realtime_check(["dy", "xhs"])
@@ -265,7 +270,11 @@ def test_realtime_regular_keyword_stays_enabled_when_any_platform_fails(monkeypa
     monkeypatch.setattr(
         crawl_all_keywords,
         "run_crawl",
-        lambda platform, keywords, **kwargs: platform == "dy",
+        lambda platform, keywords, on_keyword_completed, **kwargs: (
+            on_keyword_completed("alpha") or True
+            if platform == "dy"
+            else False
+        ),
     )
 
     crawl_all_keywords.run_realtime_check(["dy", "xhs"])
