@@ -182,6 +182,9 @@ def complete_task(task_id, success, execute_log="", error_message=""):
 
 
 def run_task(task, use_llm=True):
+    process_env = os.environ.copy()
+    process_env["PYTHONIOENCODING"] = "utf-8"
+    process_env["PYTHONUTF8"] = "1"
     command = [
         sys.executable,
         "-m",
@@ -216,6 +219,7 @@ def run_task(task, use_llm=True):
         encoding="utf-8",
         errors="replace",
         bufsize=1,
+        env=process_env,
     )
     output_lines = []
     for line in process.stdout:

@@ -1,4 +1,5 @@
 import json
+from datetime import date
 from types import SimpleNamespace
 
 import crawl_all_keywords
@@ -230,3 +231,41 @@ def test_complete_task_returns_whether_running_task_was_updated(monkeypatch):
     assert keyword_report_runner.complete_task(12, True, execute_log="done")
     assert connection.committed
     assert connection.cursor_instance.params[-1] == 12
+
+
+def test_report_runner_forces_utf8_for_child_process(monkeypatch):
+    captured = {}
+
+    class FakeProcess:
+        stdout = ["[筛选] 平台：bili\n", "[完成] 报告已保存：测试报告\n"]
+
+        @staticmethod
+        def wait():
+            return 0
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setenv("PYTHONIOENCODING", "gbk")
+    monkeypatch.setenv("PYTHONUTF8", "0")
+    monkeypatch.setattr(keyword_report_runner.subprocess, "Popen", fake_popen)
+
+    execute_log = keyword_report_runner.run_task(
+        {
+            "id": 15,
+            "prompt": "分析反馈",
+            "report_name": "测试报告",
+            "source_keyword": "测试",
+            "start_date": date(2026, 9, 1),
+            "end_date": date(2026, 9, 14),
+            "platform": "bili",
+            "post_ids": "123",
+        }
+    )
+
+    assert captured["kwargs"]["encoding"] == "utf-8"
+    assert captured["kwargs"]["env"]["PYTHONIOENCODING"] == "utf-8"
+    assert captured["kwargs"]["env"]["PYTHONUTF8"] == "1"
+    assert execute_log == "[筛选] 平台：bili\n[完成] 报告已保存：测试报告"
