@@ -182,3 +182,4 @@ database/*.db
 .omx/
 logs/
 cache/creator_failures
+task/
