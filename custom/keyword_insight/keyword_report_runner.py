@@ -3,9 +3,11 @@
 import argparse
 import ctypes
 import os
+import queue
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -22,9 +24,24 @@ CLIENT_NAME = os.getenv("KEYWORD_REPORT_RUNNER_NAME") or f"{socket.gethostname()
 POLL_SECONDS = max(int(os.getenv("KEYWORD_REPORT_POLL_SECONDS", "3")), 1)
 LOG_LIMIT = 16000
 PID_FILE = PROJECT_DIR / "logs" / "keyword_report_runner.pid"
+DEFAULT_TASK_TIMEOUT_SECONDS = 1800
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 JobObjectExtendedLimitInformation = 9
 _PROCESS_JOB_HANDLE = None
+
+
+def _env_float(name, default):
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return float(default)
+    return value if value > 0 else float(default)
+
+
+TASK_TIMEOUT_SECONDS = _env_float(
+    "KEYWORD_REPORT_TASK_TIMEOUT_SECONDS",
+    DEFAULT_TASK_TIMEOUT_SECONDS,
+)
 
 
 def trim_log(value):
@@ -181,6 +198,65 @@ def complete_task(task_id, success, execute_log="", error_message=""):
         conn.close()
 
 
+def recover_stale_tasks():
+    """将执行器被关闭后遗留的 status=1 任务标记为失败。"""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE keyword_report_task
+                SET status = 3,
+                    error_message = %s,
+                    finish_time = UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000
+                WHERE status = 1
+                  AND start_time < (
+                      UNIX_TIMESTAMP(CURRENT_TIMESTAMP(3)) * 1000 - %s * 1000
+                  )
+                """,
+                (
+                    f"执行器中断或任务超过 {int(TASK_TIMEOUT_SECONDS)} 秒未完成，已自动回收",
+                    TASK_TIMEOUT_SECONDS,
+                ),
+            )
+            recovered = cur.rowcount
+        conn.commit()
+        if recovered:
+            print(f"[恢复] 已回收 {recovered} 个遗留的执行中任务", flush=True)
+        return recovered
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _terminate_process(process):
+    if os.name == "nt" and getattr(process, "pid", None):
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=10,
+            )
+            return
+        except (OSError, TypeError, subprocess.TimeoutExpired):
+            pass
+
+    try:
+        process.kill()
+    except (AttributeError, OSError):
+        pass
+
+    try:
+        process.wait(timeout=5)
+        return
+    except (AttributeError, subprocess.TimeoutExpired, OSError):
+        pass
+
+
 def run_task(task, use_llm=True):
     process_env = os.environ.copy()
     process_env["PYTHONIOENCODING"] = "utf-8"
@@ -222,13 +298,80 @@ def run_task(task, use_llm=True):
         env=process_env,
     )
     output_lines = []
-    for line in process.stdout:
-        line = line.rstrip("\r\n")
-        if not line:
-            continue
-        output_lines.append(line)
+    if hasattr(process, "poll") and hasattr(process.stdout, "read"):
+        output_queue = queue.Queue()
 
-    return_code = process.wait()
+        def read_output():
+            try:
+                for line in process.stdout:
+                    output_queue.put(line)
+            finally:
+                output_queue.put(None)
+
+        reader = threading.Thread(target=read_output, daemon=True)
+        reader.start()
+        deadline = time.monotonic() + TASK_TIMEOUT_SECONDS
+        stream_closed = False
+        return_code = None
+        while True:
+            try:
+                line = output_queue.get(timeout=0.2)
+            except queue.Empty:
+                line = ""
+
+            if line is None:
+                stream_closed = True
+            elif line:
+                line = line.rstrip("\r\n")
+                if line:
+                    output_lines.append(line)
+                    print(f"[任务 {task['id']}] {line}", flush=True)
+
+            if process.poll() is not None and stream_closed:
+                return_code = process.returncode
+                break
+            if time.monotonic() >= deadline:
+                _terminate_process(process)
+                reader.join(timeout=5)
+                execute_log = trim_log("\n".join(output_lines))
+                raise TimeoutError(
+                    f"报告子进程超过 {int(TASK_TIMEOUT_SECONDS)} 秒未完成"
+                    + (f"：{execute_log[-1000:]}" if execute_log else "")
+                )
+    elif hasattr(process, "communicate"):
+        try:
+            output, _ = process.communicate(timeout=TASK_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as exc:
+            _terminate_process(process)
+            try:
+                remaining_output, _ = process.communicate(timeout=5)
+            except (subprocess.TimeoutExpired, OSError):
+                remaining_output = ""
+            partial_output = exc.output or ""
+            if isinstance(partial_output, bytes):
+                partial_output = partial_output.decode("utf-8", errors="replace")
+            if isinstance(remaining_output, bytes):
+                remaining_output = remaining_output.decode("utf-8", errors="replace")
+            execute_log = trim_log(f"{partial_output}{remaining_output}")
+            raise TimeoutError(
+                f"报告子进程超过 {int(TASK_TIMEOUT_SECONDS)} 秒未完成"
+                + (f"：{execute_log[-1000:]}" if execute_log else "")
+            )
+        output_lines = [
+            line.rstrip("\r\n")
+            for line in (output or "").splitlines()
+            if line.strip()
+        ]
+        return_code = process.returncode
+    else:
+        # 兼容测试替身等不提供 communicate() 的进程对象。
+        for line in process.stdout:
+            line = line.rstrip("\r\n")
+            if not line:
+                continue
+            output_lines.append(line)
+        return_code = process.wait()
+
     execute_log = trim_log("\n".join(output_lines))
     if return_code != 0:
         raise RuntimeError(execute_log or f"custom_report 退出码：{return_code}")
@@ -255,6 +398,7 @@ def main():
     register_runner_pid()
     try:
         validate_settings()
+        recover_stale_tasks()
         print(
             f"关键词报告本地执行器已启动：{CLIENT_NAME}，"
             f"每 {POLL_SECONDS} 秒检查一次任务表，启用大模型；"

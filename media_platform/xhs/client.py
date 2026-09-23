@@ -41,7 +41,13 @@ from tools import utils
 if TYPE_CHECKING:
     from proxy.proxy_ip_pool import ProxyIpPool
 
-from .exception import CaptchaError, DataFetchError, IPBlockError, NoteNotFoundError
+from .exception import (
+    CaptchaError,
+    DataFetchError,
+    InitialStateParseError,
+    IPBlockError,
+    NoteNotFoundError,
+)
 from .field import SearchNoteType, SearchSortType
 from .help import get_search_id
 from .extractor import XiaoHongShuExtractor
@@ -652,7 +658,13 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
         html_content = await self.request(
             "GET", self._domain + uri, return_response=True, headers=self.headers
         )
-        return self._extractor.extract_creator_info_from_html(html_content)
+        try:
+            return self._extractor.extract_creator_info_from_html(html_content)
+        except json.JSONDecodeError as exc:
+            raise InitialStateParseError(
+                "Failed to parse creator page initial state "
+                f"(line {exc.lineno}, column {exc.colno}, char {exc.pos})"
+            ) from exc
 
     async def get_notes_by_creator(
         self,

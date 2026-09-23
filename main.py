@@ -110,8 +110,13 @@ async def main() -> None:
         print(f"Database {args.init_db} initialized successfully.")
         return
 
-    # 检查是否有其他抓取进程正在运行（CDP 端口被占用）
-    if is_cdp_browser_running(config.CDP_DEBUG_PORT):
+    # 仅在程序会自行启动浏览器时检查 CDP 端口。
+    # CDP_CONNECT_EXISTING=True 时，已有浏览器正是预期的连接目标。
+    if (
+        config.ENABLE_CDP_MODE
+        and not config.CDP_CONNECT_EXISTING
+        and is_cdp_browser_running(config.CDP_DEBUG_PORT)
+    ):
         print(f"[Main] CDP 浏览器端口已被占用，有其他抓取进程正在运行，本次启动终止")
         sys.exit(1)
 

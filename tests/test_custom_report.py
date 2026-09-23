@@ -3,6 +3,9 @@ import sys
 from types import SimpleNamespace
 
 from custom.keyword_insight.custom_report import (
+    _build_llm_source,
+    _build_report_metadata,
+    _generate_custom_llm_report,
     build_custom_report,
     _date_string_where,
     _timestamp_where,
@@ -162,6 +165,7 @@ def test_configured_llm_models_uses_primary_and_two_fallbacks(monkeypatch):
 
 def test_generate_llm_report_uses_fallback_after_model_failure(monkeypatch):
     requested_models = []
+    client_options = {}
 
     class FakeMessages:
         def create(self, *, model, **kwargs):
@@ -172,6 +176,7 @@ def test_generate_llm_report_uses_fallback_after_model_failure(monkeypatch):
 
     class FakeClient:
         def __init__(self, **kwargs):
+            client_options.update(kwargs)
             self.messages = FakeMessages()
 
     monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(Anthropic=FakeClient))
@@ -181,6 +186,185 @@ def test_generate_llm_report_uses_fallback_after_model_failure(monkeypatch):
 
     assert generate_llm_report("prompt", max_tokens=100) == "备用模型报告"
     assert requested_models == ["primary", "secondary"]
+    assert client_options["timeout"] == 110
+
+
+def test_llm_source_limits_samples_and_text(monkeypatch):
+    monkeypatch.setenv("LLM_SOURCE_MAX_POSTS", "1")
+    monkeypatch.setenv("LLM_SOURCE_MAX_COMMENTS", "1")
+    monkeypatch.setenv("LLM_SOURCE_MAX_POST_TEXT", "4")
+    monkeypatch.setenv("LLM_SOURCE_MAX_COMMENT_TEXT", "3")
+
+    source = _build_llm_source(
+        [
+            {"note_id": "low", "desc": "低互动帖子", "liked_count": 1},
+            {"note_id": "high", "desc": "高互动帖子正文", "liked_count": 10},
+        ],
+        [
+            {"note_id": "low", "content": "低互动评论", "like_count": 1},
+            {"note_id": "high", "content": "高互动评论正文", "like_count": 10},
+        ],
+    )
+
+    assert source["posts"] == [{
+        "id": "high",
+        "platform": None,
+        "title": "",
+        "content": "高互动帖",
+        "likes": 10,
+        "comments": 0,
+    }]
+    assert source["comments"] == [{
+        "post_id": "high",
+        "content": "高互动",
+        "likes": 10,
+        "replies": 0,
+    }]
+
+
+def test_report_metadata_keeps_counts_without_duplicate_raw_samples():
+    metadata = _build_report_metadata(
+        parse_date_range("2026-07-01", "2026-07-31"),
+        "xhs",
+        [],
+        [{}],
+        [{}],
+        [],
+        1,
+        [{
+            "topic": "剧情",
+            "count": 2,
+            "percent": 50,
+            "sample_texts": ["不应进入最终元数据"],
+        }],
+        [{
+            "concern": "内容质量",
+            "count": 3,
+            "raw_samples": ["不应重复发送"],
+            "subclusters": [{
+                "name": "剧情节奏",
+                "count": 2,
+                "sample_texts": ["不应重复发送"],
+            }],
+        }],
+        {
+            "distribution": {"positive": 50, "neutral": 50, "negative": 0},
+            "positive_quotes": ["不应重复发送"],
+            "emotion_subcategories": {
+                "喜爱": {"count": 2, "samples": ["不应重复发送"]},
+            },
+        },
+        {"total_likes": 10},
+    )
+
+    serialized = str(metadata)
+    assert metadata["topics"][0]["count"] == 2
+    assert metadata["concerns"][0]["count"] == 3
+    assert metadata["sentiment"]["emotion_subcategories"]["喜爱"]["count"] == 2
+    assert "不应重复发送" not in serialized
+
+
+def _custom_llm_args(note_count):
+    notes = [
+        {
+            "note_id": f"post-{index}",
+            "title": f"标题 {index}",
+            "desc": f"正文 {index}",
+            "liked_count": index,
+            "comment_count": 1,
+        }
+        for index in range(note_count)
+    ]
+    comments = [
+        {
+            "note_id": f"post-{index}",
+            "content": f"评论 {index}",
+            "like_count": index,
+        }
+        for index in range(note_count)
+    ]
+    return (
+        "分析用户反馈",
+        parse_date_range("2026-07-01", "2026-07-31"),
+        "xhs",
+        [],
+        notes,
+        comments,
+        [],
+        note_count,
+        [],
+        [],
+        {},
+        {"total_likes": sum(range(note_count))},
+    )
+
+
+def test_custom_llm_report_does_not_batch_up_to_100_posts(monkeypatch):
+    requests = []
+
+    def fake_generate(prompt, max_tokens):
+        requests.append((prompt, max_tokens))
+        return "最终报告"
+
+    monkeypatch.setattr(
+        "custom.keyword_insight.custom_report.generate_llm_report",
+        fake_generate,
+    )
+
+    report = _generate_custom_llm_report(*_custom_llm_args(100))
+
+    assert report == "最终报告"
+    assert len(requests) == 1
+    assert "第 1/" not in requests[0][0]
+    assert '"id": "post-0"' in requests[0][0]
+    assert '"id": "post-99"' in requests[0][0]
+
+
+def test_custom_llm_report_batches_every_100_posts_then_merges(monkeypatch):
+    requests = []
+
+    def fake_generate(prompt, max_tokens):
+        requests.append((prompt, max_tokens))
+        if "第 1/2 批" in prompt:
+            return "第一批摘要"
+        if "第 2/2 批" in prompt:
+            return "第二批摘要"
+        return "最终报告"
+
+    monkeypatch.setattr(
+        "custom.keyword_insight.custom_report.generate_llm_report",
+        fake_generate,
+    )
+
+    report = _generate_custom_llm_report(*_custom_llm_args(101))
+
+    assert report == "最终报告"
+    assert len(requests) == 3
+    assert requests[0][1] == 700
+    assert requests[1][1] == 700
+    assert requests[2][1] == 1200
+    assert "本批包含 100 篇帖子" in requests[0][0]
+    assert "本批包含 1 篇帖子" in requests[1][0]
+    assert "第一批摘要" in requests[2][0]
+    assert "第二批摘要" in requests[2][0]
+
+
+def test_custom_llm_report_stops_when_a_batch_fails(monkeypatch):
+    requests = []
+
+    def fake_generate(prompt, max_tokens):
+        requests.append(prompt)
+        return None if "第 2/2 批" in prompt else "第一批摘要"
+
+    monkeypatch.setattr(
+        "custom.keyword_insight.custom_report.generate_llm_report",
+        fake_generate,
+    )
+
+    report = _generate_custom_llm_report(*_custom_llm_args(101))
+
+    assert report is None
+    assert len(requests) == 2
 
 
 def test_generate_llm_report_returns_none_after_all_models_fail(monkeypatch):

@@ -16,6 +16,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
+import config
 from custom.db import get_conn
 from custom.keyword_insight.notify_client import send_keyword_task_completion
 from tools.cdp_guard import is_cdp_browser_running
@@ -353,7 +354,11 @@ def run_crawl(
 
 def ensure_cdp_browser_idle(mode_label: str) -> bool:
     """在进入抓取流程前检查 CDP 浏览器是否空闲。"""
-    if is_cdp_browser_running():
+    if (
+        config.ENABLE_CDP_MODE
+        and not config.CDP_CONNECT_EXISTING
+        and is_cdp_browser_running(config.CDP_DEBUG_PORT)
+    ):
         print(f"[{mode_label}] 上一次抓取的浏览器仍在运行，跳过本次执行")
         return False
     return True

@@ -3,6 +3,25 @@ import os
 
 AI_FAILURE_MESSAGE = "AI生成失败，请稍后重试"
 DEFAULT_LLM_MODEL = "claude-haiku-4-5-20251001"
+DEFAULT_LLM_TIMEOUT_SECONDS = 110
+
+
+def _env_float(name, default):
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return float(default)
+    return value if value > 0 else float(default)
+
+
+def _error_summary(exc):
+    """保留接口错误的类型和状态码，避免失败时只剩下笼统提示。"""
+    status_code = getattr(exc, "status_code", None)
+    detail = str(exc).strip() or repr(exc)
+    prefix = f"{type(exc).__name__}"
+    if status_code is not None:
+        prefix += f" HTTP {status_code}"
+    return f"{prefix}: {detail}"
 
 
 def configured_llm_models():
@@ -29,6 +48,10 @@ def generate_llm_report(prompt, max_tokens):
         base_url = os.environ.get("ANTHROPIC_BASE_URL")
         if base_url:
             client_kwargs["base_url"] = base_url
+        client_kwargs["timeout"] = _env_float(
+            "ANTHROPIC_TIMEOUT_SECONDS",
+            DEFAULT_LLM_TIMEOUT_SECONDS,
+        )
         client = anthropic.Anthropic(**client_kwargs)
     except Exception as exc:
         print(f"[LLM] 初始化客户端失败：{exc}", flush=True)
@@ -52,7 +75,7 @@ def generate_llm_report(prompt, max_tokens):
             print(f"[LLM] 模型生成成功：{model}", flush=True)
             return report_text
         except Exception as exc:
-            print(f"[LLM] 模型 {model} 生成失败：{exc}", flush=True)
+            print(f"[LLM] 模型 {model} 生成失败：{_error_summary(exc)}", flush=True)
 
     print("[LLM] 所有配置模型均生成失败", flush=True)
     return None

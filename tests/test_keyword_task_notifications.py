@@ -269,3 +269,57 @@ def test_report_runner_forces_utf8_for_child_process(monkeypatch):
     assert captured["kwargs"]["env"]["PYTHONIOENCODING"] == "utf-8"
     assert captured["kwargs"]["env"]["PYTHONUTF8"] == "1"
     assert execute_log == "[筛选] 平台：bili\n[完成] 报告已保存：测试报告"
+
+
+def test_report_runner_fails_when_child_process_times_out(monkeypatch):
+    class FakeProcess:
+        pid = 123
+        returncode = -9
+
+        def __init__(self):
+            self.killed = False
+            self.communicate_calls = 0
+
+        def communicate(self, timeout=None):
+            self.communicate_calls += 1
+            if self.communicate_calls == 1:
+                raise keyword_report_runner.subprocess.TimeoutExpired(
+                    "custom_report",
+                    timeout,
+                    output="[数据] 正在查询帖子和评论数据\n",
+                )
+            return "", None
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    process = FakeProcess()
+    monkeypatch.setattr(keyword_report_runner, "TASK_TIMEOUT_SECONDS", 1)
+    monkeypatch.setattr(
+        keyword_report_runner.subprocess,
+        "Popen",
+        lambda command, **kwargs: process,
+    )
+
+    try:
+        keyword_report_runner.run_task(
+            {
+                "id": 16,
+                "prompt": "分析反馈",
+                "report_name": "超时测试",
+                "source_keyword": "测试",
+                "start_date": date(2026, 9, 1),
+                "end_date": date(2026, 9, 14),
+                "platform": "bili",
+                "post_ids": "123",
+            }
+        )
+    except TimeoutError as exc:
+        assert "超过 1 秒未完成" in str(exc)
+    else:
+        raise AssertionError("超时任务应抛出 TimeoutError")
+
+    assert process.killed

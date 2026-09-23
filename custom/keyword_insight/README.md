@@ -130,9 +130,34 @@ ANTHROPIC_FALLBACK_MODEL_2=your-third-model
 
 # 兼容旧配置：仅在未设置 ANTHROPIC_DEFAULT_HAIKU_MODEL 时作为主模型使用
 ANTHROPIC_MODEL=claude-haiku-4-5-20251001
+
+# 单次模型请求超时（秒，默认110）
+ANTHROPIC_TIMEOUT_SECONDS=110
+
+# 自定义报告超过该帖子数时启用分批汇总（默认每批100篇）
+LLM_REPORT_BATCH_SIZE=100
+
+# 每批摘要和最终报告的最大输出 token
+LLM_BATCH_SUMMARY_MAX_TOKENS=700
+LLM_REPORT_MAX_TOKENS=1200
+
+# 每批最多携带的关联评论数，以及帖子/评论正文截取长度
+LLM_SOURCE_MAX_COMMENTS=100
+LLM_SOURCE_MAX_POST_TEXT=350
+LLM_SOURCE_MAX_COMMENT_TEXT=220
 ```
 
 所有报告都由 AI 生成，不再提供模板模式。系统会依次尝试主模型和两个备用模型；全部失败或均未返回内容时，报告内容固定为 `AI生成失败，请稍后重试`。
+
+自定义报告在帖子数不超过 `LLM_REPORT_BATCH_SIZE` 时直接生成；超过限制时，会先按每批 100 篇生成结构化摘要，再结合全量本地统计和全部批次摘要生成最终报告。任一批次失败时整个任务失败，不会使用不完整数据保存报告。
+
+报告执行器还会限制单个 `custom_report` 子进程的最长执行时间，默认 1800 秒（30 分钟）：
+
+```env
+KEYWORD_REPORT_TASK_TIMEOUT_SECONDS=1800
+```
+
+超时或执行器中断后，任务会被标记为失败（`status=3`），并写入 `error_message`，不会永久停留在执行中（`status=1`）。
 
 ## 输出
 

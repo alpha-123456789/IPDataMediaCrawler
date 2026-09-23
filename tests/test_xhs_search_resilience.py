@@ -9,7 +9,8 @@ import config
 from media_platform.xhs import core as xhs_core
 from media_platform.xhs.client import XiaoHongShuClient
 from media_platform.xhs.core import XiaoHongShuCrawler
-from media_platform.xhs.exception import CaptchaError
+from media_platform.xhs.exception import CaptchaError, InitialStateParseError
+from media_platform.xhs.extractor import XiaoHongShuExtractor
 from tools import crawl_dedup
 
 
@@ -221,6 +222,45 @@ async def test_detail_skips_when_api_and_html_are_empty(monkeypatch):
     )
 
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_creator_parse_error_is_converted_to_data_fetch_error():
+    client = object.__new__(XiaoHongShuClient)
+    client._domain = "https://www.xiaohongshu.com"
+    client.headers = {}
+    client.request = AsyncMock(
+        return_value=(
+            '<script>window.__INITIAL_STATE__={"user":{"userPageData":'
+            '{"value":void 0}}};</script>'
+        )
+    )
+    client._extractor = XiaoHongShuExtractor()
+
+    with pytest.raises(InitialStateParseError, match="Failed to parse creator page initial state"):
+        await client.get_creator_info("creator-with-invalid-state")
+
+
+@pytest.mark.asyncio
+async def test_creator_parse_error_is_not_persisted_as_creator_failure(monkeypatch):
+    crawler = XiaoHongShuCrawler()
+    crawler.xhs_client = AsyncMock()
+    crawler.xhs_client.get_creator_info.side_effect = InitialStateParseError(
+        "Failed to parse creator page initial state"
+    )
+    crawler._get_uncrawled_creator_ids = AsyncMock(return_value=["creator-with-invalid-state"])
+    recorded_failures = []
+
+    monkeypatch.setattr(xhs_core.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(
+        xhs_core,
+        "record_creator_failure",
+        lambda platform, creator_id: recorded_failures.append((platform, creator_id)),
+    )
+
+    await crawler.get_creators_and_notes()
+
+    assert recorded_failures == []
 
 
 @pytest.mark.asyncio

@@ -55,7 +55,7 @@ from tools.keyword_date_filter import (
     is_post_within_keyword_date_range,
 )
 from .client import XiaoHongShuClient
-from .exception import CaptchaError, NoteNotFoundError
+from .exception import CaptchaError, InitialStateParseError, NoteNotFoundError
 from .field import SearchSortType
 from .help import parse_note_info_from_note_url, parse_creator_info_from_url, get_search_id
 from .login import XiaoHongShuLogin
@@ -536,6 +536,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
         creator_id_list = await self._get_uncrawled_creator_ids()
 
         for user_id in creator_id_list:
+            should_record_failure = True
             while True:
                 await asyncio.sleep(config.XHS_CRAWLER_SLEEP_SEC * 2)
                 try:
@@ -545,16 +546,25 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     if not ex.redirect_url:
                         ex.redirect_url = f"{self.index_url}/user/profile/{user_id}"
                     await self._wait_for_captcha(ex)
+                except InitialStateParseError as ex:
+                    should_record_failure = False
+                    utils.logger.warning(
+                        f"[XiaoHongShuCrawler] 博主页面解析失败，跳过但不写入失败缓存: {user_id}, {ex}"
+                    )
+                    createor_info = None
+                    break
                 except httpx.RequestError as ex:
-                    record_creator_failure("xhs", user_id)
                     utils.logger.warning(f"[XiaoHongShuCrawler] 记录失败博主并跳过: {user_id}, {ex}")
                     createor_info = None
                     break
             if createor_info:
                 await xhs_store.save_creator(user_id, creator=createor_info)
             else:
-                record_creator_failure("xhs", user_id)
-                utils.logger.warning(f"[XiaoHongShuCrawler.get_creators_and_notes] 获取用户 {user_id} 信息为空，已记录并跳过")
+                if should_record_failure:
+                    record_creator_failure("xhs", user_id)
+                    utils.logger.warning(
+                        f"[XiaoHongShuCrawler.get_creators_and_notes] 获取用户 {user_id} 信息为空，已记录并跳过"
+                    )
                 continue
 
             # region 这里是抓取创作者的笔记，目前不需要，先隐藏

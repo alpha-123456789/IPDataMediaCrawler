@@ -27,6 +27,10 @@ class DataFetchError(RequestError):
     """something error when fetch"""
 
 
+class InitialStateParseError(DataFetchError):
+    """The page loaded, but its embedded initial state could not be parsed."""
+
+
 class IPBlockError(RequestError):
     """fetch so fast that the server block us ip"""
 

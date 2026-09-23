@@ -568,33 +568,196 @@ def _safe_int(value):
         return 0
 
 
-def _build_llm_source(notes, comments):
+def _positive_int_env(name, default):
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def _build_llm_source(notes, comments, max_posts=None, max_comments=None):
+    # 统计分析仍使用全部数据；发给模型的正文长度受限，避免代理的响应超时。
+    max_posts = max_posts or _positive_int_env("LLM_SOURCE_MAX_POSTS", 100)
+    max_comments = max_comments or _positive_int_env("LLM_SOURCE_MAX_COMMENTS", 100)
+    max_post_text = _positive_int_env("LLM_SOURCE_MAX_POST_TEXT", 350)
+    max_comment_text = _positive_int_env("LLM_SOURCE_MAX_COMMENT_TEXT", 220)
     ranked_notes = sorted(
         notes,
         key=lambda item: _safe_int(item.get("liked_count")) + _safe_int(item.get("comment_count")),
         reverse=True,
-    )[:200]
+    )[:max_posts]
     ranked_comments = sorted(
         comments,
         key=lambda item: _safe_int(item.get("like_count")) + _safe_int(item.get("sub_comment_count")),
         reverse=True,
-    )[:500]
+    )[:max_comments]
     return {
         "posts": [{
             "id": item.get("note_id"),
             "platform": item.get("platform"),
-            "title": item.get("title") or "",
-            "content": item.get("desc") or "",
+            "title": (item.get("title") or "")[:max_post_text],
+            "content": (item.get("desc") or "")[:max_post_text],
             "likes": _safe_int(item.get("liked_count")),
             "comments": _safe_int(item.get("comment_count")),
         } for item in ranked_notes],
         "comments": [{
             "post_id": item.get("note_id"),
-            "content": item.get("content") or "",
+            "content": (item.get("content") or "")[:max_comment_text],
             "likes": _safe_int(item.get("like_count")),
             "replies": _safe_int(item.get("sub_comment_count")),
         } for item in ranked_comments],
     }
+
+
+def _build_report_metadata(
+    date_range,
+    platform,
+    post_ids,
+    notes,
+    comments,
+    creators,
+    creator_count,
+    topics,
+    concerns,
+    sentiment,
+    engagement,
+):
+    compact_topics = [
+        {
+            key: item.get(key)
+            for key in ("topic", "count", "percent", "matched_keywords", "top_keywords")
+            if key in item
+        }
+        for item in topics[:10]
+    ]
+    compact_concerns = []
+    for item in concerns[:10]:
+        compact_concerns.append({
+            "concern": item.get("concern"),
+            "count": item.get("count", 0),
+            "views": item.get("views", []),
+            "subclusters": [
+                {
+                    key: subcluster.get(key)
+                    for key in ("name", "count", "percent", "top_keywords")
+                    if key in subcluster
+                }
+                for subcluster in item.get("subclusters", [])
+            ],
+        })
+    compact_sentiment = {
+        "distribution": sentiment.get("distribution", {}),
+        "emotion_subcategories": {
+            name: {"count": value.get("count", 0)}
+            for name, value in sentiment.get("emotion_subcategories", {}).items()
+        },
+    }
+    return {
+        "post_publish_date": f"{date_range.start_date} 至 {date_range.end_date}",
+        "platform": platform,
+        "post_ids": post_ids or "全部符合日期条件的帖子",
+        "note_count": len(notes),
+        "comment_count": len(comments),
+        "creator_count": creator_count,
+        "total_likes": engagement.get("total_likes", 0),
+        "topics": compact_topics,
+        "concerns": compact_concerns,
+        "sentiment": compact_sentiment,
+        "loaded_creator_profiles": len(creators),
+    }
+
+
+def _build_final_llm_prompt(prompt, metadata, source_data=None, batch_summaries=None):
+    if batch_summaries is None:
+        evidence_section = f"""代表性帖子和关联评论（帖子按互动量、评论按点赞和回复数排序；统计结论仍基于全部已筛选数据）：
+{json.dumps(source_data, ensure_ascii=False)}"""
+    else:
+        evidence_section = f"""全部帖子已按批次完成分析。以下是各批次的结构化摘要，每篇帖子只属于一个批次：
+{json.dumps(batch_summaries, ensure_ascii=False, indent=2)}
+
+合并要求：
+- 汇总所有批次后再下结论，不要只采用前几个批次
+- 相同主题、诉求和风险需要跨批次合并去重
+- 数量和比例以“数据筛选条件与统计”中的全量本地统计为准
+- 批次摘要中的频次仅代表对应批次，应累加后比较，不要把每批等权处理
+- 少数意见应标明是少量反馈，不要夸大为普遍结论"""
+
+    return f"""你是资深社媒数据分析师。请严格按“分析要求”生成中文报告，所有结论仅基于下面的筛选数据；数据不足时请明确说明，不要虚构。
+
+分析要求：
+{prompt}
+
+数据筛选条件与统计：
+{json.dumps(metadata, ensure_ascii=False, indent=2)}
+
+{evidence_section}
+
+请直接输出报告正文，不要复述任务或数据输入。"""
+
+
+def _generate_batch_summaries(prompt, notes, comments, batch_size):
+    ranked_notes = sorted(
+        notes,
+        key=lambda item: _safe_int(item.get("liked_count")) + _safe_int(item.get("comment_count")),
+        reverse=True,
+    )
+    comments_by_post = {}
+    for comment in comments:
+        comments_by_post.setdefault(comment.get("note_id"), []).append(comment)
+
+    batches = [
+        ranked_notes[index:index + batch_size]
+        for index in range(0, len(ranked_notes), batch_size)
+    ]
+    summaries = []
+    summary_max_tokens = _positive_int_env("LLM_BATCH_SUMMARY_MAX_TOKENS", 700)
+    max_comments = _positive_int_env("LLM_SOURCE_MAX_COMMENTS", 100)
+
+    for batch_index, batch_notes in enumerate(batches, start=1):
+        batch_comments = [
+            comment
+            for note in batch_notes
+            for comment in comments_by_post.get(note.get("note_id"), [])
+        ]
+        source_data = _build_llm_source(
+            batch_notes,
+            batch_comments,
+            max_posts=batch_size,
+            max_comments=max_comments,
+        )
+        batch_prompt = f"""你是资深社媒数据分析师。下面是完整数据集的第 {batch_index}/{len(batches)} 批，本批包含 {len(batch_notes)} 篇帖子。
+
+最终报告的分析要求：
+{prompt}
+
+本批帖子和关联评论：
+{json.dumps(source_data, ensure_ascii=False)}
+
+请只分析本批数据并输出紧凑的结构化摘要，供后续跨批次合并。必须包括：
+1. 与分析要求相关的主要主题、诉求、风险和情感倾向
+2. 每项结论在本批中的大致出现次数
+3. 少数但重要的异常或负面反馈
+4. 能支撑结论的简短原文证据
+
+不要生成最终报告，不要推断其他批次，不要使用 Markdown 代码块。"""
+        print(
+            f"[LLM] 正在汇总第 {batch_index}/{len(batches)} 批："
+            f"帖子 {len(batch_notes)} 篇，关联评论 {len(batch_comments)} 条",
+            flush=True,
+        )
+        summary = generate_llm_report(batch_prompt, max_tokens=summary_max_tokens)
+        if not summary:
+            print(f"[LLM] 第 {batch_index}/{len(batches)} 批汇总失败", flush=True)
+            return None
+        summaries.append({
+            "batch": batch_index,
+            "post_count": len(batch_notes),
+            "comment_count": len(batch_comments),
+            "summary": summary,
+        })
+
+    return summaries
 
 
 def build_custom_report(
@@ -675,34 +838,56 @@ def _generate_custom_llm_report(
     engagement,
 ):
     """使用调用方给出的 prompt 生成报告；不可用时返回 None。"""
-    source_data = _build_llm_source(notes, comments)
-    metadata = {
-        "post_publish_date": f"{date_range.start_date} 至 {date_range.end_date}",
-        "platform": platform,
-        "post_ids": post_ids or "全部符合日期条件的帖子",
-        "note_count": len(notes),
-        "comment_count": len(comments),
-        "creator_count": creator_count,
-        "total_likes": engagement.get("total_likes", 0),
-        "topics": topics[:10],
-        "concerns": concerns[:10],
-        "sentiment": sentiment,
-        "loaded_creator_profiles": len(creators),
-    }
-    llm_prompt = f"""你是资深社媒数据分析师。请严格按“分析要求”生成中文报告，所有结论仅基于下面的筛选数据；数据不足时请明确说明，不要虚构。
+    batch_size = _positive_int_env("LLM_REPORT_BATCH_SIZE", 100)
+    metadata = _build_report_metadata(
+        date_range,
+        platform,
+        post_ids,
+        notes,
+        comments,
+        creators,
+        creator_count,
+        topics,
+        concerns,
+        sentiment,
+        engagement,
+    )
+    if len(notes) <= batch_size:
+        print(f"[LLM] 帖子数未超过 {batch_size}，直接生成最终报告", flush=True)
+        source_data = _build_llm_source(
+            notes,
+            comments,
+            max_posts=batch_size,
+        )
+        llm_prompt = _build_final_llm_prompt(
+            prompt,
+            metadata,
+            source_data=source_data,
+        )
+    else:
+        total_batches = (len(notes) + batch_size - 1) // batch_size
+        print(
+            f"[LLM] 帖子数 {len(notes)} 超过 {batch_size}，"
+            f"将分为 {total_batches} 批汇总",
+            flush=True,
+        )
+        batch_summaries = _generate_batch_summaries(
+            prompt,
+            notes,
+            comments,
+            batch_size,
+        )
+        if not batch_summaries:
+            return None
+        print("[LLM] 所有批次汇总完成，正在生成最终报告", flush=True)
+        llm_prompt = _build_final_llm_prompt(
+            prompt,
+            metadata,
+            batch_summaries=batch_summaries,
+        )
 
-分析要求：
-{prompt}
-
-数据筛选条件与统计：
-{json.dumps(metadata, ensure_ascii=False, indent=2)}
-
-代表性帖子和关联评论（帖子按互动量、评论按点赞和回复数排序；统计结论仍基于全部已筛选数据）：
-{json.dumps(source_data, ensure_ascii=False)}
-
-    请直接输出报告正文，不要复述任务或数据输入。"""
-
-    return generate_llm_report(llm_prompt, max_tokens=2000)
+    max_tokens = _positive_int_env("LLM_REPORT_MAX_TOKENS", 1200)
+    return generate_llm_report(llm_prompt, max_tokens=max_tokens)
 
 
 def main():
@@ -799,6 +984,10 @@ def main():
         creator_count,
         use_llm=True,
     )
+
+    if report == AI_FAILURE_MESSAGE:
+        print("[错误] AI 报告生成失败，未保存失败占位内容", file=sys.stderr, flush=True)
+        sys.exit(2)
 
     CustomReportRepository().save(
         report_name=report_name,
