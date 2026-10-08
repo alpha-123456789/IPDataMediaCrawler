@@ -183,3 +183,4 @@ database/*.db
 logs/
 cache/creator_failures
 task/
+crawl_history.json
