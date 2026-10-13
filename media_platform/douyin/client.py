@@ -24,7 +24,7 @@ import urllib.parse
 from typing import TYPE_CHECKING, Any, Callable, Dict, Union, Optional
 
 import httpx
-from playwright.async_api import BrowserContext
+from playwright.async_api import BrowserContext, Error as PlaywrightError
 
 from base.base_crawler import AbstractApiClient
 from proxy.proxy_mixin import ProxyRefreshMixin
@@ -184,16 +184,47 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
         headers = headers or self.headers
         return await self.request(method="POST", url=f"{self._host}{uri}", data=data, headers=headers)
 
-    async def pong(self, browser_context: BrowserContext) -> bool:
-        local_storage = await self.playwright_page.evaluate("() => window.localStorage")
-        if local_storage.get("HasUserLogin", "") == "1":
-            return True
+    async def pong(self, browser_context: BrowserContext) -> Optional[bool]:
+        """Confirm server-side login; None means the check was inconclusive."""
+        try:
+            await self.update_cookies(browser_context)
+            response = await self.get(
+                "/aweme/v1/web/user/profile/self/",
+                params={"source": "webapp"},
+            )
+        except (httpx.RequestError, PlaywrightError) as exc:
+            utils.logger.warning(
+                f"[DouYinClient.pong] 登录状态检查失败: {type(exc).__name__}"
+            )
+            return None
 
-        _, cookie_dict = await utils.convert_browser_context_cookies(
-            browser_context,
-            urls=self.cookie_urls,
+        if not isinstance(response, dict):
+            return None
+        status_code = response.get("status_code")
+        status_message = str(response.get("status_msg") or "").strip().lower()
+        if status_code in (8, "8") or status_message in (
+            "user not login",
+            "user not logged in",
+            "not logged in",
+            "login required",
+            "login expired",
+            "用户未登录",
+            "未登录",
+            "请先登录",
+            "登录已过期",
+        ):
+            return False
+        user = response.get("user")
+        if (
+            status_code in (0, "0")
+            and isinstance(user, dict)
+            and str(user.get("uid") or "").strip() not in ("", "0")
+        ):
+            return True
+        utils.logger.warning(
+            f"[DouYinClient.pong] 无法确认登录状态，status_code: {status_code}"
         )
-        return cookie_dict.get("LOGIN_STATUS") == "1"
+        return None
 
     async def update_cookies(self, browser_context: BrowserContext, urls: Optional[list[str]] = None):
         cookie_str, cookie_dict = await utils.convert_browser_context_cookies(

@@ -51,6 +51,7 @@ from tools.keyword_date_filter import is_post_within_keyword_date_range
 from var import crawler_type_var, source_keyword_var
 
 from .client import DouYinClient
+from .exception import DataFetchError
 from .field import PublishTimeType, SearchSortType
 from .help import parse_video_info_from_url, parse_creator_info_from_url
 from .login import DouYinLogin
@@ -120,19 +121,7 @@ class DouYinCrawler(AbstractCrawler):
             )
 
             self.dy_client = await self.create_douyin_client(httpx_proxy_format)
-            if not await self.dy_client.pong(browser_context=self.browser_context):
-                login_obj = DouYinLogin(
-                    login_type=config.LOGIN_TYPE,
-                    login_phone="",  # you phone number
-                    browser_context=self.browser_context,
-                    context_page=self.context_page,
-                    cookie_str=config.COOKIES,
-                )
-                await login_obj.begin()
-                await self.dy_client.update_cookies(
-                    browser_context=self.browser_context,
-                    urls=self.cookie_urls,
-                )
+            await self._ensure_logged_in()
             crawler_type_var.set(config.CRAWLER_TYPE)
             if config.CRAWLER_TYPE == "search":
                 # Search for notes and retrieve their comment information.
@@ -145,6 +134,70 @@ class DouYinCrawler(AbstractCrawler):
                 await self.get_creators_and_videos()
 
             utils.logger.info("[DouYinCrawler.start] Douyin Crawler finished ...")
+
+    async def _ensure_logged_in(self, timeout_seconds: int = 3600) -> bool:
+        """Wait for a confirmed login state; return whether login was renewed."""
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                while not self.context_page.is_closed():
+                    logged_in = await self.dy_client.pong(
+                        browser_context=self.browser_context
+                    )
+                    if logged_in is True:
+                        return False
+                    if logged_in is False:
+                        utils.logger.warning(
+                            "[DouYinCrawler] 服务器确认未登录或登录已过期，请在浏览器中重新登录，"
+                            "最多等待 1 小时"
+                        )
+                        login_obj = DouYinLogin(
+                            login_type=config.LOGIN_TYPE,
+                            browser_context=self.browser_context,
+                            context_page=self.context_page,
+                            dy_client=self.dy_client,
+                            cookie_str=config.COOKIES,
+                        )
+                        await login_obj.begin()
+                        await self.dy_client.update_cookies(
+                            browser_context=self.browser_context,
+                            urls=self.cookie_urls,
+                        )
+                        return True
+                    utils.logger.warning(
+                        "[DouYinCrawler] 暂时无法确认登录状态，保留浏览器，5 秒后重新检查，"
+                        "最多等待 1 小时"
+                    )
+                    await asyncio.sleep(5)
+        except TimeoutError:
+            utils.logger.error(
+                f"[DouYinCrawler] 等待确认登录状态超时（{timeout_seconds} 秒），自动退出程序"
+            )
+            raise SystemExit(1)
+        raise DataFetchError("浏览器页面已关闭，停止检查登录状态")
+
+    async def _search_with_login_recovery(self, **search_params) -> Dict:
+        while True:
+            try:
+                response = await self.dy_client.search_info_by_keyword(**search_params)
+            except DataFetchError:
+                response = {}
+
+            valid_response = False
+            if isinstance(response, dict):
+                data = response.get("data")
+                status_code = response.get("status_code")
+                valid_response = (
+                    isinstance(data, list)
+                    and status_code in (None, 0, "0")
+                )
+                if valid_response and data:
+                    return response
+
+            if not await self._ensure_logged_in():
+                if valid_response:
+                    return response
+                raise DataFetchError("登录有效，但搜索响应异常，未将其作为空结果")
+            utils.logger.info("[DouYinCrawler.search] 重新登录成功，重试当前搜索页")
 
     async def search(self) -> None:
         utils.logger.info("[DouYinCrawler.search] Begin search douyin keywords")
@@ -173,7 +226,7 @@ class DouYinCrawler(AbstractCrawler):
                     continue
                 try:
                     utils.logger.info(f"[DouYinCrawler.search] search douyin keyword: {keyword}, page: {page}")
-                    posts_res = await self.dy_client.search_info_by_keyword(
+                    posts_res = await self._search_with_login_recovery(
                         keyword=keyword,
                         offset=page * dy_limit_count - dy_limit_count,
                         sort_type=(
@@ -184,8 +237,8 @@ class DouYinCrawler(AbstractCrawler):
                         publish_time=PublishTimeType(config.PUBLISH_TIME_TYPE),
                         search_id=dy_search_id,
                     )
-                    if posts_res.get("data") is None or posts_res.get("data") == []:
-                        utils.logger.info(f"[DouYinCrawler.search] search douyin keyword: {keyword}, page: {page} is empty,{posts_res.get('data')}`")
+                    if posts_res["data"] == []:
+                        utils.logger.info(f"[DouYinCrawler.search] search douyin keyword: {keyword}, page: {page} is empty")
                         break
                 except httpx.RequestError as ex:
                     keyword_completed = False
@@ -196,10 +249,6 @@ class DouYinCrawler(AbstractCrawler):
                     break
 
                 page += 1
-                if "data" not in posts_res:
-                    keyword_completed = False
-                    utils.logger.error(f"[DouYinCrawler.search] search douyin keyword: {keyword} failed，账号也许被风控了。")
-                    break
                 dy_search_id = posts_res.get("extra", {}).get("logid", "")
                 page_aweme_list = []
                 # Collect candidate aweme_ids for dedup check

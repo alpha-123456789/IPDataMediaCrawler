@@ -21,17 +21,18 @@
 import asyncio
 import functools
 import sys
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
-from playwright.async_api import BrowserContext, Page
+from playwright.async_api import BrowserContext, Error as PlaywrightError, Page
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-from tenacity import (RetryError, retry, retry_if_result, stop_after_attempt,
-                      wait_fixed)
 
 import config
 from base.base_crawler import AbstractLogin
 from cache.cache_factory import CacheFactory
 from tools import utils
+
+if TYPE_CHECKING:
+    from .client import DouYinClient
 
 
 class DouYinLogin(AbstractLogin):
@@ -40,85 +41,87 @@ class DouYinLogin(AbstractLogin):
                  login_type: str,
                  browser_context: BrowserContext, # type: ignore
                  context_page: Page, # type: ignore
+                 dy_client: "DouYinClient",
                  login_phone: Optional[str] = "",
                  cookie_str: Optional[str] = ""
                  ):
         config.LOGIN_TYPE = login_type
         self.browser_context = browser_context
         self.context_page = context_page
+        self.dy_client = dy_client
         self.login_phone = login_phone
         self.scan_qrcode_time = 60
         self.cookie_str = cookie_str
 
     async def begin(self):
-        """
-            Start login douyin website
-            The verification accuracy of the slider verification is not very good... If there are no special requirements, it is recommended not to use Douyin login, or use cookie login
-        """
-
-        # popup login dialog
-        await self.popup_login_dialog()
-
-        # select login type
+        """Keep the browser open until manual login is confirmed by the server."""
+        if self.context_page.is_closed():
+            raise RuntimeError("浏览器页面已关闭，无法重新登录")
+        await self.context_page.bring_to_front()
+        try:
+            # Refresh stale account UI so an expired session exposes the login entry.
+            await self.context_page.reload(wait_until="domcontentloaded", timeout=60_000)
+        except PlaywrightError:
+            utils.logger.warning("[DouYinLogin.begin] 页面刷新失败，请手动打开抖音登录入口")
+        try:
+            await self.popup_login_dialog()
+        except PlaywrightError:
+            utils.logger.warning(
+                "[DouYinLogin.begin] 未能自动打开登录入口，请在浏览器中手动打开"
+            )
         if config.LOGIN_TYPE == "qrcode":
-            await self.login_by_qrcode()
+            try:
+                await self.login_by_qrcode()
+            except PlaywrightError:
+                utils.logger.warning(
+                    "[DouYinLogin.begin] 无法提取二维码，请在浏览器中手动完成登录"
+                )
         elif config.LOGIN_TYPE == "phone":
             await self.login_by_mobile()
         elif config.LOGIN_TYPE == "cookie":
             await self.login_by_cookies()
         else:
-            raise ValueError("[DouYinLogin.begin] Invalid Login Type Currently only supported qrcode or phone or cookie ...")
+            raise ValueError(
+                "[DouYinLogin.begin] Invalid Login Type. "
+                "Supported values are qrcode, phone, and cookie."
+            )
+        utils.logger.info(
+            "[DouYinLogin.begin] 请在浏览器中完成登录或验证。"
+            "最多等待 1 小时，服务器确认登录成功后自动继续抓取；Ctrl+C 可取消。"
+        )
+        await self.check_login_state()
+        utils.logger.info("[DouYinLogin.begin] 服务器已确认登录成功，继续抓取")
 
-        # If the page redirects to the slider verification page, need to slide again
-        await asyncio.sleep(6)
-        current_page_title = await self.context_page.title()
-        if "验证码中间页" in current_page_title:
-            await self.check_page_display_slider(move_step=3, slider_level="hard")
-
-        # check login state
-        utils.logger.info(f"[DouYinLogin.begin] login finished then check login state ...")
+    async def check_login_state(self, timeout_seconds: int = 3600):
+        """Poll server login state for at most one hour, including request time."""
         try:
-            await self.check_login_state()
-        except RetryError:
-            utils.logger.info("[DouYinLogin.begin] login failed please confirm ...")
-            sys.exit(1)
-
-        # wait for redirect
-        wait_redirect_seconds = 5
-        utils.logger.info(f"[DouYinLogin.begin] Login successful then wait for {wait_redirect_seconds} seconds redirect ...")
-        await asyncio.sleep(wait_redirect_seconds)
-
-    @retry(stop=stop_after_attempt(600), wait=wait_fixed(1), retry=retry_if_result(lambda value: value is False))
-    async def check_login_state(self):
-        """Check if the current login status is successful and return True otherwise return False"""
-        current_cookie = await self.browser_context.cookies()
-        _, cookie_dict = utils.convert_cookies(current_cookie)
-
-        for page in self.browser_context.pages:
-            try:
-                local_storage = await page.evaluate("() => window.localStorage")
-                if local_storage.get("HasUserLogin", "") == "1":
-                    return True
-            except Exception as e:
-                # utils.logger.warn(f"[DouYinLogin] check_login_state waring: {e}")
-                await asyncio.sleep(0.1)
-
-        if cookie_dict.get("LOGIN_STATUS") == "1":
-            return True
-
-        return False
+            async with asyncio.timeout(timeout_seconds):
+                while not self.context_page.is_closed():
+                    logged_in = await self.dy_client.pong(self.browser_context)
+                    if logged_in is True:
+                        return True
+                    utils.logger.info(
+                        "[DouYinLogin.check_login_state] "
+                        + ("等待人工登录..." if logged_in is False else "暂时无法确认登录状态，继续检查...")
+                    )
+                    await asyncio.sleep(5)
+        except TimeoutError:
+            utils.logger.error(
+                f"[DouYinLogin] 等待登录超时（{timeout_seconds} 秒），自动退出程序"
+            )
+            raise SystemExit(1)
+        raise RuntimeError("浏览器页面已关闭，停止等待登录")
 
     async def popup_login_dialog(self):
         """If the login dialog box does not pop up automatically, we will manually click the login button"""
         dialog_selector = "xpath=//div[@id='login-panel-new']"
         try:
-            # check dialog box is auto popup and wait for 10 seconds
-            await self.context_page.wait_for_selector(dialog_selector, timeout=1000 * 10)
+            await self.context_page.wait_for_selector(dialog_selector, timeout=3000)
         except Exception as e:
             utils.logger.error(f"[DouYinLogin.popup_login_dialog] login dialog box does not pop up automatically, error: {e}")
             utils.logger.info("[DouYinLogin.popup_login_dialog] login dialog box does not pop up automatically, we will manually click the login button")
             login_button_ele = self.context_page.locator("xpath=//p[text() = '登录']")
-            await login_button_ele.click()
+            await login_button_ele.click(timeout=3000)
             await asyncio.sleep(0.5)
 
     async def login_by_qrcode(self):
@@ -129,8 +132,10 @@ class DouYinLogin(AbstractLogin):
             selector=qrcode_img_selector
         )
         if not base64_qrcode_img:
-            utils.logger.info("[DouYinLogin.login_by_qrcode] login qrcode not found please confirm ...")
-            sys.exit(1)
+            utils.logger.warning(
+                "[DouYinLogin.login_by_qrcode] 未找到二维码，保留浏览器等待人工登录"
+            )
+            return
 
         partial_show_qrcode = functools.partial(utils.show_qrcode, base64_qrcode_img)
         asyncio.get_running_loop().run_in_executor(executor=None, func=partial_show_qrcode)
