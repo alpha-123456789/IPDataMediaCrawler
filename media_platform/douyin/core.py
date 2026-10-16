@@ -48,6 +48,7 @@ from tools.crawl_dedup import (
 )
 from tools.crawl_progress import emit_keyword_completed
 from tools.keyword_date_filter import is_post_within_keyword_date_range
+from tools.keyword_content_filter import content_matches_keyword
 from var import crawler_type_var, source_keyword_var
 
 from .client import DouYinClient
@@ -258,7 +259,7 @@ class DouYinCrawler(AbstractCrawler):
                         aweme_info: Dict = (post_item.get("aweme_info") or post_item.get("aweme_mix_info", {}).get("mix_items")[0])
                     except TypeError:
                         continue
-                    if keyword in aweme_info.get("desc", ""):
+                    if content_matches_keyword(aweme_info, keyword):
                         candidate_awemes.append(aweme_info)
 
                 candidate_awemes = [
@@ -342,11 +343,13 @@ class DouYinCrawler(AbstractCrawler):
         semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
         task_list = [self.get_aweme_detail(aweme_id=aweme_id, semaphore=semaphore) for aweme_id in aweme_id_list]
         aweme_details = await asyncio.gather(*task_list)
+        matched_aweme_ids = []
         for aweme_detail in aweme_details:
-            if aweme_detail is not None:
+            if aweme_detail is not None and content_matches_keyword(aweme_detail):
                 await douyin_store.update_douyin_aweme(aweme_item=aweme_detail)
                 await self.get_aweme_media(aweme_item=aweme_detail)
-        await self.batch_get_note_comments(aweme_id_list)
+                matched_aweme_ids.append(aweme_detail.get("aweme_id"))
+        await self.batch_get_note_comments(matched_aweme_ids)
 
     async def get_aweme_detail(self, aweme_id: str, semaphore: asyncio.Semaphore) -> Any:
         """Get note detail"""
@@ -464,7 +467,7 @@ class DouYinCrawler(AbstractCrawler):
 
         note_details = await asyncio.gather(*task_list)
         for aweme_item in note_details:
-            if aweme_item is not None:
+            if aweme_item is not None and content_matches_keyword(aweme_item):
                 await douyin_store.update_douyin_aweme(aweme_item=aweme_item)
                 await self.get_aweme_media(aweme_item=aweme_item)
 

@@ -348,13 +348,16 @@ async def test_zhihu_specified_note_failure_does_not_cancel_other_notes(monkeypa
     ]
     monkeypatch.setattr(config, "ZHIHU_SPECIFIED_ID_LIST", urls)
     monkeypatch.setattr(config, "MAX_CONCURRENCY_NUM", 2)
+    monkeypatch.setattr(config, "CRAWLER_TYPE", "detail")
+    monkeypatch.setattr(config, "KEYWORDS", "alpha")
+    good_note = {"content_id": "22", "title": "alpha"}
 
     crawler = ZhihuCrawler()
     request = httpx.Request("GET", urls[0])
     crawler.get_note_detail = AsyncMock(
         side_effect=[
             httpx.ReadTimeout("timeout after retries", request=request),
-            {"content_id": "22"},
+            good_note,
         ]
     )
     crawler.batch_get_content_comments = AsyncMock()
@@ -366,9 +369,9 @@ async def test_zhihu_specified_note_failure_does_not_cancel_other_notes(monkeypa
 
     await crawler.get_specified_notes()
 
-    update_content.assert_awaited_once_with({"content_id": "22"})
+    update_content.assert_awaited_once_with(good_note)
     crawler.batch_get_content_comments.assert_awaited_once_with(
-        [{"content_id": "22"}]
+        [good_note]
     )
 
 

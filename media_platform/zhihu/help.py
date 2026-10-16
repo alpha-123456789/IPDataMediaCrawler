@@ -109,9 +109,10 @@ class ZhihuExtractor:
         res.content_id = answer.get("id")
         res.content_type = answer.get("type")
         res.content_text = extract_text_from_html(answer.get("content", ""))
-        res.question_id = answer.get("question").get("id")
+        question = answer.get("question") or {}
+        res.question_id = question.get("id", "")
         res.content_url = f"{zhihu_constant.ZHIHU_URL}/question/{res.question_id}/answer/{res.content_id}"
-        res.title = extract_text_from_html(answer.get("title", ""))
+        res.title = extract_text_from_html(answer.get("title") or question.get("title", ""))
         res.desc = extract_text_from_html(answer.get("description", "") or answer.get("excerpt", ""))
         res.created_time = answer.get("created_time")
         res.updated_time = answer.get("updated_time")

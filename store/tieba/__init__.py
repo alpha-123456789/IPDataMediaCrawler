@@ -22,6 +22,7 @@
 from typing import List
 
 from model.m_baidu_tieba import TiebaComment, TiebaCreator, TiebaNote
+from tools.keyword_content_filter import content_matches_keyword
 from var import source_keyword_var
 
 from ._store_impl import *
@@ -72,6 +73,8 @@ async def update_tieba_note(note_item: TiebaNote):
     Returns:
 
     """
+    if not content_matches_keyword(note_item):
+        return
     note_item.source_keyword = source_keyword_var.get()
     save_note_item = note_item.model_dump()
     save_note_item.update({"last_modify_ts": utils.get_current_timestamp()})

@@ -50,6 +50,7 @@ from tools.crawl_dedup import (
     filter_uncrawled_note_ids,
 )
 from tools.crawl_progress import emit_keyword_completed
+from tools.keyword_content_filter import content_matches_keyword
 from tools.keyword_date_filter import (
     extract_publication_time,
     is_post_within_keyword_date_range,
@@ -290,7 +291,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
                             )
                             continue
 
-                        if keyword in note_detail.get("title", "") or keyword in note_detail.get("desc", ""):
+                        if content_matches_keyword(note_detail, keyword):
                             self.success += 1
                             keyword_crawled_count += 1
                             await xhs_store.update_xhs_note(note_detail)
@@ -601,7 +602,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
 
         note_details = await asyncio.gather(*task_list)
         for note_detail in note_details:
-            if note_detail:
+            if note_detail and content_matches_keyword(note_detail):
                 await xhs_store.update_xhs_note(note_detail)
                 await self.get_notice_media(note_detail)
 
@@ -626,7 +627,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
         xsec_tokens = []
         note_details = await asyncio.gather(*get_note_detail_task_list)
         for note_detail in note_details:
-            if note_detail:
+            if note_detail and content_matches_keyword(note_detail):
                 need_get_comment_note_ids.append(note_detail.get("note_id", ""))
                 xsec_tokens.append(note_detail.get("xsec_token", ""))
                 await xhs_store.update_xhs_note(note_detail)

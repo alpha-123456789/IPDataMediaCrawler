@@ -25,6 +25,7 @@
 from typing import List
 
 import config
+from tools.keyword_content_filter import content_matches_keyword
 from var import source_keyword_var
 
 from ._store_impl import *
@@ -52,6 +53,8 @@ class KuaishouStoreFactory:
 
 
 async def update_kuaishou_video(video_item: Dict):
+    if not content_matches_keyword(video_item):
+        return
     photo_info: Dict = video_item.get("photo", {})
     video_id = photo_info.get("id")
     if not video_id:
@@ -63,8 +66,8 @@ async def update_kuaishou_video(video_item: Dict):
     save_content_item = {
         "video_id": video_id,
         "video_type": str(video_item.get("type")),
-        "title": photo_info.get("caption", "")[:500],
-        "desc": photo_info.get("caption", "")[:500],
+        "title": (photo_info.get("caption") or "")[:500],
+        "desc": (photo_info.get("caption") or "")[:500],
         "create_time": photo_info.get("timestamp"),
         "user_id": user_info.get("id"),
         "nickname": user_info.get("name"),

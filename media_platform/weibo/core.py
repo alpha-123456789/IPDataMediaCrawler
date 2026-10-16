@@ -53,6 +53,7 @@ from tools.crawl_dedup import (
 )
 from tools.crawl_progress import emit_keyword_completed
 from tools.keyword_date_filter import is_post_within_keyword_date_range
+from tools.keyword_content_filter import content_matches_keyword
 from var import crawler_type_var, source_keyword_var
 
 from .client import WeiboClient
@@ -249,8 +250,8 @@ class WeiboCrawler(AbstractCrawler):
                 note_list = await self.batch_get_notes_full_text(note_list)
                 for note_item in note_list:
                     if note_item:
-                        mblog: Dict = note_item.get("mblog")
-                        if mblog  and keyword in mblog.get("text"):
+                        mblog: Dict = note_item.get("mblog") or {}
+                        if mblog and content_matches_keyword(note_item, keyword):
                             if str(mblog.get("id")) in comment_note_ids:
                                 note_id_list.append(mblog.get("id"))
                             await weibo_store.update_weibo_note(note_item)
@@ -278,10 +279,12 @@ class WeiboCrawler(AbstractCrawler):
         semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
         task_list = [self.get_note_info_task(note_id=note_id, semaphore=semaphore) for note_id in config.WEIBO_SPECIFIED_ID_LIST]
         video_details = await asyncio.gather(*task_list)
+        matched_note_ids = []
         for note_item in video_details:
-            if note_item:
+            if note_item and content_matches_keyword(note_item):
                 await weibo_store.update_weibo_note(note_item)
-        await self.batch_get_notes_comments(config.WEIBO_SPECIFIED_ID_LIST)
+                matched_note_ids.append(note_item["mblog"]["id"])
+        await self.batch_get_notes_comments(matched_note_ids)
 
     async def get_note_info_task(self, note_id: str, semaphore: asyncio.Semaphore) -> Optional[Dict]:
         """

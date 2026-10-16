@@ -25,6 +25,7 @@
 from typing import List
 
 import config
+from tools.keyword_content_filter import content_matches_keyword
 from var import source_keyword_var
 
 from ._store_impl import *
@@ -52,6 +53,8 @@ class BiliStoreFactory:
 
 
 async def update_bilibili_video(video_item: Dict):
+    if not content_matches_keyword(video_item):
+        return
     video_item_view: Dict = video_item.get("View")
     video_user_info: Dict = video_item_view.get("owner")
     video_item_stat: Dict = video_item_view.get("stat")
@@ -59,8 +62,8 @@ async def update_bilibili_video(video_item: Dict):
     save_content_item = {
         "video_id": video_id,
         "video_type": "video",
-        "title": video_item_view.get("title", "")[:500],
-        "desc": video_item_view.get("desc", "")[:500],
+        "title": (video_item_view.get("title") or "")[:500],
+        "desc": (video_item_view.get("desc") or "")[:500],
         "create_time": video_item_view.get("pubdate"),
         "user_id": str(video_user_info.get("mid")),
         "nickname": video_user_info.get("name"),
@@ -217,6 +220,8 @@ async def update_bilibili_creator_contact(creator_info: Dict, fan_info: Dict):
 
 
 async def update_bilibili_creator_dynamic(creator_info: Dict, dynamic_info: Dict):
+    if not content_matches_keyword(dynamic_info):
+        return
     save_dynamic_item = {
         "dynamic_id": dynamic_info["dynamic_id"],
         "user_id": creator_info["id"],

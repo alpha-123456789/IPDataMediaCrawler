@@ -42,6 +42,7 @@ from proxy.proxy_ip_pool import IpInfoModel, create_ip_pool
 from store import zhihu as zhihu_store
 from tools import utils
 from tools.cdp_browser import CDPBrowserManager
+from tools.keyword_content_filter import content_matches_keyword
 from var import crawler_type_var, source_keyword_var
 
 from .client import ZhiHuClient
@@ -198,7 +199,10 @@ class ZhihuCrawler(AbstractCrawler):
                     remaining_count = keyword_max_note_count - keyword_crawled_count
                     if remaining_count <= 0:
                         break
-                    content_list = content_list[:remaining_count]
+                    content_list = [
+                        content for content in content_list
+                        if content_matches_keyword(content, keyword)
+                    ][:remaining_count]
 
                     # Sleep after page navigation
                     await asyncio.sleep(config.CRAWLER_MAX_SLEEP_SEC)
@@ -346,7 +350,10 @@ class ZhihuCrawler(AbstractCrawler):
             # )
 
             # Get all comments of the creator's contents
-            await self.batch_get_content_comments(all_content_list)
+            await self.batch_get_content_comments([
+                content for content in all_content_list
+                if content_matches_keyword(content)
+            ])
 
     async def get_note_detail(
         self, full_note_url: str, semaphore: asyncio.Semaphore
@@ -442,6 +449,8 @@ class ZhihuCrawler(AbstractCrawler):
                 continue
 
             note_detail = cast(ZhihuContent, note_detail)  # only for type check
+            if not content_matches_keyword(note_detail):
+                continue
             need_get_comment_notes.append(note_detail)
             await zhihu_store.update_zhihu_content(note_detail)
 

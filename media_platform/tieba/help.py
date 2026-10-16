@@ -546,7 +546,12 @@ class TieBaExtractor:
         note = TiebaNote(
             note_id=note_id,
             title=content_selector.xpath("//title/text()").get(default="").strip(),
-            desc=content_selector.xpath("//meta[@name='description']/@content").get(default="").strip(),
+            desc=(
+                self._selector_text(
+                    first_floor_selector, f".//div[{self._class_contains('d_post_content')}]"
+                )
+                or content_selector.xpath("//meta[@name='description']/@content").get(default="").strip()
+            ),
             note_url=const.TIEBA_URL + f"/p/{note_id}",
             user_link=self._absolute_url(author_link),
             user_nickname=(

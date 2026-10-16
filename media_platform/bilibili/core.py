@@ -55,6 +55,7 @@ from tools.crawl_dedup import (
     filter_uncrawled_note_ids,
 )
 from tools.crawl_progress import emit_keyword_completed
+from tools.keyword_content_filter import content_matches_keyword
 from tools.keyword_date_filter import (
     get_keyword_date_range,
     is_post_within_keyword_date_range,
@@ -297,10 +298,8 @@ class BilibiliCrawler(AbstractCrawler):
                     if not video_item:
                         continue
                     view = video_item.get("View") or {}
-                    title = view.get("title", "")
-                    desc = view.get("desc", "")
                     aid = view.get("aid", "")
-                    if keyword in title or keyword in desc:
+                    if content_matches_keyword(video_item, keyword):
                         if str(aid) in comment_aids:
                             video_id_list.append(aid)
                         await bilibili_store.update_bilibili_video(video_item)
@@ -423,7 +422,7 @@ class BilibiliCrawler(AbstractCrawler):
                         video_items = await asyncio.gather(*task_list)
 
                         for video_item in video_items:
-                            if video_item:
+                            if video_item and content_matches_keyword(video_item, keyword):
                                 if total_notes_crawled_for_keyword >= keyword_max_note_count:
                                     break
                                 if notes_count_this_day >= config.MAX_NOTES_PER_DAY:
@@ -547,7 +546,7 @@ class BilibiliCrawler(AbstractCrawler):
         video_details = await asyncio.gather(*task_list)
         video_aids_list = []
         for video_detail in video_details:
-            if video_detail is not None:
+            if video_detail is not None and content_matches_keyword(video_detail):
                 video_item_view: Dict = video_detail.get("View")
                 video_aid: str = video_item_view.get("aid")
                 if video_aid:

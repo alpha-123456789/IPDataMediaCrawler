@@ -44,6 +44,7 @@ from tools.crawl_dedup import (
     filter_uncrawled_note_ids,
 )
 from tools.crawl_progress import emit_keyword_completed
+from tools.keyword_content_filter import content_matches_keyword
 from tools.keyword_date_filter import (
     extract_publication_time,
     get_keyword_date_range,
@@ -214,7 +215,8 @@ class KuaishouCrawler(AbstractCrawler):
                 feeds = [
                     video_detail
                     for video_detail in raw_feeds
-                    if is_post_within_keyword_date_range(
+                    if content_matches_keyword(video_detail, keyword)
+                    and is_post_within_keyword_date_range(
                         keyword,
                         extract_publication_time(video_detail),
                     )
@@ -286,10 +288,12 @@ class KuaishouCrawler(AbstractCrawler):
             for video_id in video_ids
         ]
         video_details = await asyncio.gather(*task_list)
+        matched_video_ids = []
         for video_detail in video_details:
-            if video_detail is not None:
+            if video_detail is not None and content_matches_keyword(video_detail):
                 await kuaishou_store.update_kuaishou_video(video_detail)
-        await self.batch_get_video_comments(video_ids)
+                matched_video_ids.append(video_detail["photo"]["id"])
+        await self.batch_get_video_comments(matched_video_ids)
 
     async def get_video_info_task(
         self, video_id: str, semaphore: asyncio.Semaphore
@@ -538,6 +542,7 @@ class KuaishouCrawler(AbstractCrawler):
 
             video_ids = [
                 video_item.get("photo", {}).get("id") for video_item in all_video_list
+                if content_matches_keyword(video_item)
             ]
             await self.batch_get_video_comments(video_ids)
 
@@ -553,7 +558,7 @@ class KuaishouCrawler(AbstractCrawler):
 
         video_details = await asyncio.gather(*task_list)
         for video_detail in video_details:
-            if video_detail is not None:
+            if video_detail is not None and content_matches_keyword(video_detail):
                 await kuaishou_store.update_kuaishou_video(video_detail)
 
     async def close(self):

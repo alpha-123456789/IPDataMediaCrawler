@@ -24,6 +24,7 @@
 from typing import List
 
 import config
+from tools.keyword_content_filter import content_matches_keyword
 from var import source_keyword_var
 
 from .xhs_store_media import *
@@ -93,6 +94,8 @@ async def update_xhs_note(note_item: Dict):
     Returns:
 
     """
+    if not content_matches_keyword(note_item):
+        return
     note_id = note_item.get("note_id")
     user_info = note_item.get("user", {})
     interact_info = note_item.get("interact_info", {})
@@ -108,7 +111,7 @@ async def update_xhs_note(note_item: Dict):
     local_db_item = {
         "note_id": note_item.get("note_id"),  # Note ID
         "type": note_item.get("type"),  # Note type
-        "title": note_item.get("title") or note_item.get("desc", "")[:255],  # Note title
+        "title": note_item.get("title") or (note_item.get("desc") or "")[:255],  # Note title
         "desc": note_item.get("desc", ""),  # Note description
         "video_url": video_url,  # Note video url
         "time": note_item.get("time"),  # Note publish time

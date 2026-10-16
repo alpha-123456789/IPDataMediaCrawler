@@ -24,6 +24,7 @@
 from typing import List
 
 import config
+from tools.keyword_content_filter import content_matches_keyword
 from var import source_keyword_var
 
 from ._store_impl import *
@@ -155,6 +156,8 @@ def _extract_music_download_url(aweme_detail: Dict) -> str:
 
 
 async def update_douyin_aweme(aweme_item: Dict):
+    if not content_matches_keyword(aweme_item):
+        return
     aweme_id = aweme_item.get("aweme_id")
     user_info = aweme_item.get("author", {})
     interact_info = aweme_item.get("statistics", {})

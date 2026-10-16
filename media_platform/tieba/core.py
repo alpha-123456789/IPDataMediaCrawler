@@ -38,6 +38,7 @@ from proxy.proxy_ip_pool import IpInfoModel, ProxyIpPool, create_ip_pool
 from store import tieba as tieba_store
 from tools import utils
 from tools.cdp_browser import CDPBrowserManager
+from tools.keyword_content_filter import content_matches_keyword
 from var import crawler_type_var, source_keyword_var
 
 from .client import BaiduTieBaClient
@@ -289,7 +290,7 @@ class TieBaCrawler(AbstractCrawler):
         note_details = await asyncio.gather(*task_list)
         note_details_model: List[TiebaNote] = []
         for note_detail in note_details:
-            if note_detail is not None:
+            if note_detail is not None and content_matches_keyword(note_detail):
                 note_details_model.append(note_detail)
                 await tieba_store.update_tieba_note(note_detail)
         await self.batch_get_note_comments(note_details_model)
@@ -415,7 +416,10 @@ class TieBaCrawler(AbstractCrawler):
                         )
                     )
 
-                    await self.batch_get_note_comments(all_notes_list)
+                    await self.batch_get_note_comments([
+                        note for note in all_notes_list
+                        if content_matches_keyword(note)
+                    ])
 
                 else:
                     utils.logger.error(

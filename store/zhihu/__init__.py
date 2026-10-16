@@ -32,6 +32,7 @@ from ._store_impl import (ZhihuCsvStoreImplement,
                                           ZhihuMongoStoreImplement,
                                           ZhihuExcelStoreImplement)
 from tools import utils
+from tools.keyword_content_filter import content_matches_keyword
 from var import source_keyword_var
 
 
@@ -78,6 +79,8 @@ async def update_zhihu_content(content_item: ZhihuContent):
     Returns:
 
     """
+    if not content_matches_keyword(content_item):
+        return
     content_item.source_keyword = source_keyword_var.get()
     local_db_item = content_item.model_dump()
     local_db_item.update({"last_modify_ts": utils.get_current_timestamp()})

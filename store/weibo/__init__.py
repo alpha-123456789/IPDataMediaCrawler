@@ -25,6 +25,7 @@
 import re
 from typing import List
 
+from tools.keyword_content_filter import content_matches_keyword
 from var import source_keyword_var
 
 from .weibo_store_media import *
@@ -78,10 +79,12 @@ async def update_weibo_note(note_item: Dict):
     if not note_item:
         return
 
+    if not content_matches_keyword(note_item):
+        return
     mblog: Dict = note_item.get("mblog")
     user_info: Dict = mblog.get("user")
     note_id = mblog.get("id")
-    content_text = mblog.get("text")
+    content_text = mblog.get("text") or ""
     clean_text = re.sub(r"<.*?>", "", content_text)
     save_content_item = {
         # Weibo information
