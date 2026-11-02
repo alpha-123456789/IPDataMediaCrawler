@@ -425,37 +425,34 @@ def run_realtime_check(platforms: list):
     failed_crawls = set()
 
     for platform in platforms:
-        for kw in keywords:
-            # 抓取开始前更新 remark
-            update_remark([kw], "正在实时抓取")
+        update_remark(keywords, "正在实时抓取")
 
-            crawl_kwargs = {}
-            if kw in keyword_date_ranges:
-                crawl_kwargs["keyword_date_ranges"] = {
-                    kw: keyword_date_ranges[kw]
-                }
-            crawl_kwargs["keyword_sort_modes"] = {kw: keyword_sort_modes[kw]}
-            if platform == "xhs":
-                crawl_kwargs["keyword_filter_note_times"] = {
-                    kw: keyword_filter_note_times[kw]
-                }
-            if kw in keyword_max_note_counts:
-                crawl_kwargs["keyword_max_note_counts"] = {
-                    kw: keyword_max_note_counts[kw]
-                }
-            completed_keywords = set()
-            ok = run_crawl(
-                platform,
-                [kw],
-                on_keyword_completed=completed_keywords.add,
-                **crawl_kwargs,
-            )
-            crawl_succeeded = ok and kw in completed_keywords
-            if crawl_succeeded:
-                print(f"[REALTIME DONE] {platform} / {kw}")
-                successful_crawls.add((platform, kw))
-                update_remark([kw], "实时抓取完成")
-            else:
+        crawl_kwargs = {"keyword_sort_modes": keyword_sort_modes}
+        if keyword_date_ranges:
+            crawl_kwargs["keyword_date_ranges"] = keyword_date_ranges
+        if platform == "xhs":
+            crawl_kwargs["keyword_filter_note_times"] = keyword_filter_note_times
+        if keyword_max_note_counts:
+            crawl_kwargs["keyword_max_note_counts"] = keyword_max_note_counts
+
+        completed_keywords = set()
+
+        def checkpoint_keyword(keyword: str) -> None:
+            if keyword in completed_keywords:
+                return
+            completed_keywords.add(keyword)
+            successful_crawls.add((platform, keyword))
+            print(f"[REALTIME DONE] {platform} / {keyword}")
+            update_remark([keyword], "实时抓取完成")
+
+        ok = run_crawl(
+            platform,
+            keywords,
+            on_keyword_completed=checkpoint_keyword,
+            **crawl_kwargs,
+        )
+        for kw in keywords:
+            if kw not in completed_keywords:
                 if ok:
                     print(
                         f"[REALTIME] {platform} / {kw} 进程退出码为 0，"
